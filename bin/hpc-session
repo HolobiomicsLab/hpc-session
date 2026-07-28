@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# hpc-session — one authenticated window to a SLURM cluster, for humans and for agents.
+#
+# Opens a single multiplexed SSH master (bringing a VPN up first if the site needs one,
+# answering a TOTP prompt if the site enforces 2FA), then runs any number of commands,
+# copies and job submissions over it without authenticating again. Works from a shell
+# with no controlling terminal, which is what makes it usable unattended.
+#
+#   hpc-session open                       # VPN up + one authenticated master
+#   hpc-session run squeue -u \$USER        # runs ON the cluster, no further code
+#   hpc-session local rsync -a ./data host:/scratch/   # runs LOCALLY over the same master
+#   hpc-session push job.slurm /scratch/   # copy up
+#   hpc-session submit job.slurm           # copy up + sbatch, prints the job id
+#   hpc-session watch 12345                # poll until it leaves the queue
+#   hpc-session fetch 12345 ./results      # bring the job's files back
+#   hpc-session close                      # drop master + VPN, freeing the link
+#
+# Setup:  hpc-session init [profile]  ->  edit the profile  ->  hpc-session doctor
+# Docs:   README.md, docs/2fa-enrollment.md, docs/vpn-hooks.md
+
+set -uo pipefail
+
+# Resolve through symlinks so the tool works when linked onto $PATH.
+hs_script_dir() {
+  local source="${BASH_SOURCE[0]}" dir
+  while [ -L "$source" ]; do
+    dir=$(cd -P "$(dirname "$source")" && pwd)
+    source=$(readlink "$source")
+    case "$source" in /*) ;; *) source="$dir/$source" ;; esac
+  done
+  cd -P "$(dirname "$source")" && pwd
+}
+
+HS_ROOT=$(dirname "$(hs_script_dir)")
+. "$HS_ROOT/lib/config.sh"
+. "$HS_ROOT/lib/totp.sh"
+. "$HS_ROOT/lib/session.sh"
+. "$HS_ROOT/lib/slurm.sh"
+
+hs_usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-1}"; }
+
+hs_report() {  # label, ok/fail, detail
+  [ "$2" = ok ] && printf '  ok    %-12s %s\n' "$1" "$3" || printf '  FAIL  %-12s %s\n' "$1" "$3"
+}
+
+hs_doctor_tool() {  # tool name, why it is needed
+  command -v "$1" >/dev/null && hs_report "$1" ok "$(command -v "$1")" \
+                             || hs_report "$1" fail "not found — $2"
+}
+
+hs_doctor_totp() {
+  [ "$HS_TOTP_BACKEND" = none ] && { hs_report totp ok "disabled (key-only login)"; return; }
+  hs_have_seed && hs_report totp ok "seed readable via '$HS_TOTP_BACKEND'" \
+               || hs_report totp fail "no seed in '$HS_TOTP_BACKEND' — run: hpc-session store-seed"
+}
+
+hs_doctor_vpn() {
+  hs_uses_vpn || { hs_report vpn ok "not configured"; return; }
+  [ -n "$HS_VPN_STATUS_CMD" ] && hs_report vpn ok "hooks set" \
+                              || hs_report vpn fail "HS_VPN_UP_CMD set but HS_VPN_STATUS_CMD is not"
+}
+
+# Everything checkable without touching the network — safe to run before a first login.
+hs_doctor() {
+  echo "profile $HS_PROFILE ($(hs_profile_path "$HS_PROFILE"))"
+  [ -n "$HS_HOST" ] && hs_report host ok "$HS_HOST" || hs_report host fail "HS_HOST is unset"
+  hs_doctor_tool ssh "the whole tool depends on it"
+  [ "$HS_TOTP_BACKEND" = none ] || hs_doctor_tool "$HS_PYTHON" "needed to generate TOTP codes"
+  hs_doctor_totp
+  hs_doctor_vpn
+  if [ -n "$HS_HOST" ] && hs_ssh -G "$HS_HOST" >/dev/null 2>&1; then
+    hs_report ssh_conf ok "$(hs_ssh -G "$HS_HOST" 2>/dev/null | awk '/^hostname /{print $2}')"
+  else
+    hs_report ssh_conf fail "ssh cannot resolve host '$HS_HOST'"
+  fi
+  echo "(doctor makes no network connection — run 'hpc-session open' for the real test)"
+}
+
+HS_PROFILE="${HS_PROFILE:-default}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -p|--profile) HS_PROFILE="${2:?--profile needs a name}"; shift 2 ;;
+    -h|--help)    hs_usage 0 ;;
+    *)            break ;;
+  esac
+done
+
+hs_load_profile
+
+case "${1:-}" in
+  open)       shift; hs_open_session ;;
+  close)      shift; hs_close_session ;;
+  status)     shift; hs_status ;;
+  doctor)     shift; hs_doctor ;;
+  init)       shift; HS_PROFILE="${1:-$HS_PROFILE}"; hs_init_profile ;;
+  code)       shift; hs_code || hs_die "no code available (backend '$HS_TOTP_BACKEND')" ;;
+  store-seed) shift; hs_store_seed ;;
+  ssh-opts)   shift; hs_ssh_opts; echo ;;
+  run)        shift; [ "${1:-}" = "--" ] && shift; [ $# -gt 0 ] || hs_die "run needs a command"; hs_run "$@" ;;
+  local)      shift; [ "${1:-}" = "--" ] && shift; [ $# -gt 0 ] || hs_die "local needs a command"; hs_local "$@" ;;
+  push)       shift; [ $# -eq 2 ] || hs_die "usage: push <local> <remote>"; hs_push "$1" "$2" ;;
+  pull)       shift; [ $# -eq 2 ] || hs_die "usage: pull <remote> <local>"; hs_pull "$1" "$2" ;;
+  submit)     shift; hs_submit "$@" ;;
+  queue)      shift; hs_queue ;;
+  watch)      shift; hs_watch "$@" ;;
+  fetch)      shift; hs_fetch "$@" ;;
+  cancel)     shift; hs_cancel "$@" ;;
+  render)     shift; [ $# -ge 1 ] || hs_die "usage: render <template> [KEY=VALUE...]"; hs_render "$@" ;;
+  *)          hs_usage ;;
+esac

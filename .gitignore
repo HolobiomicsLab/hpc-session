@@ -1,0 +1,9 @@
+# Never commit a profile: they name real hosts and accounts, and may reference secrets.
+*.conf
+!examples/*.conf
+
+# Never commit a seed.
+*.seed
+
+tests/tmp-config/
+.DS_Store

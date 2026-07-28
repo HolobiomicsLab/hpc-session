@@ -1,0 +1,35 @@
+#!/bin/bash
+#SBATCH --job-name=${JOB_NAME}
+#SBATCH --account=${SLURM_ACCOUNT}
+#SBATCH --partition=${SLURM_PARTITION}
+#SBATCH --nodes=${SLURM_NODES}
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=${SLURM_CPUS}
+#SBATCH --mem=${SLURM_MEM}
+#SBATCH --time=${SLURM_TIME}
+#SBATCH --output=%x-%j.out
+#SBATCH --error=%x-%j.err
+#
+# Rendered by `hpc-session render`. Placeholders come from the profile; any extra
+# KEY=VALUE argument becomes an extra substitution:
+#
+#   hpc-session render templates/job.slurm.tmpl JOB_NAME=align PAYLOAD='./run.sh in.fa' > job.slurm
+#   hpc-session submit job.slurm
+#
+# An empty placeholder removes its whole #SBATCH line, so an unset account or partition
+# does not become a `--account=` that SLURM rejects.
+#
+# Keep %j in the --output/--error patterns: `hpc-session fetch <jobid>` finds the files
+# by job id.
+
+set -uo pipefail
+
+echo "node:  $(hostname)"
+echo "start: $(date)"
+cd "${REMOTE_WORKDIR}" || exit 1
+
+${PAYLOAD}
+rc=$?
+
+echo "end:   $(date)"
+exit $rc

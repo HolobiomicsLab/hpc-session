@@ -1,0 +1,57 @@
+# hpc-session profile. Copy to ~/.config/hpc-session/<name>.conf (chmod 600).
+# Shell syntax — it is sourced. Anything already set in the environment wins, so
+# one-off overrides need no edit:  HS_HOST=other-login hpc-session status
+#
+# The only required key is HS_HOST. Everything else has a working default.
+
+# --- the cluster ------------------------------------------------------------------
+# An ssh_config Host alias, or user@hostname. An alias is better: it keeps your key,
+# user and jump host in ~/.ssh/config where every other tool can see them too.
+HS_HOST=""
+
+# Where job scripts are copied and jobs are submitted from.
+HS_REMOTE_WORKDIR="/scratch/\$USER/jobs"
+
+# --- SLURM defaults, used when rendering templates/job.slurm.tmpl -------------------
+# Leave a value empty and the matching #SBATCH line is dropped from the rendered script.
+HS_SLURM_ACCOUNT=""
+HS_SLURM_PARTITION=""
+HS_SLURM_TIME="01:00:00"
+HS_SLURM_CPUS="1"
+HS_SLURM_MEM="4G"
+HS_SLURM_NODES="1"
+
+# --- VPN (optional) ----------------------------------------------------------------
+# Leave HS_VPN_UP_CMD empty if the cluster is reachable directly. Any VPN works: these
+# are just shell commands. HS_VPN_STATUS_CMD must exit 0 when the tunnel is up.
+# See docs/vpn-hooks.md for Cisco Secure Client, WireGuard, OpenVPN and Tailscale.
+HS_VPN_UP_CMD=""
+HS_VPN_DOWN_CMD=""
+HS_VPN_STATUS_CMD=""
+
+# --- two-factor authentication (optional) ------------------------------------------
+# none     — key-only login (the common case)
+# keychain — macOS login Keychain (see HS_TOTP_SERVICE / HS_TOTP_ACCOUNT)
+# pass     — the standard unix password manager (see HS_TOTP_PASS_ENTRY)
+# file     — a chmod-600 file holding the base32 seed (see HS_TOTP_FILE)
+# command  — run your own command, which must print the 6 digits (see HS_TOTP_CMD)
+#
+# READ docs/2fa-enrollment.md BEFORE choosing anything but `none` or `command`:
+# storing the seed beside your SSH key puts both factors on one disk.
+HS_TOTP_BACKEND="none"
+HS_TOTP_SERVICE="hpc-session-totp"
+HS_TOTP_ACCOUNT=""
+HS_TOTP_PASS_ENTRY=""
+HS_TOTP_FILE=""
+HS_TOTP_CMD=""
+
+# Google Authenticator's profile. Change only if your site says otherwise.
+HS_TOTP_DIGITS="6"
+HS_TOTP_PERIOD="30"
+HS_TOTP_ALGO="sha1"
+
+# --- connection tuning --------------------------------------------------------------
+HS_CONTROL_PERSIST="8h"     # how long an idle master survives
+HS_CONNECT_TIMEOUT="25"     # seconds
+HS_AUTH_ATTEMPTS="3"        # retries when a TOTP code was already consumed
+HS_PYTHON="python3"         # only used to generate TOTP codes
