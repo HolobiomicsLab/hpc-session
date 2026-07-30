@@ -144,6 +144,9 @@ hs_open_session() {
   # Verify we CAN authenticate BEFORE raising the tunnel: a full-tunnel VPN monopolises
   # the link, so failing afterwards would strand any other remote access.
   if [ "$HS_TOTP_BACKEND" != none ] && ! hs_have_seed; then
+    if [ "$HS_TOTP_BACKEND" = command ]; then
+      hs_die "HS_TOTP_BACKEND=command but HS_TOTP_CMD is empty — set it to a command that prints one code"
+    fi
     hs_die "no TOTP seed stored and no HS_OTP. Run: hpc-session store-seed"
   fi
   hs_vpn_connect

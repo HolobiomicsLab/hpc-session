@@ -121,6 +121,49 @@ check_contains "pipe in payload survives" "cat in.txt | sort > out.txt && echo d
 warning=$(hs_render "$HS_ROOT/templates/job.slurm.tmpl" JOB_NAME=demo 2>&1 >/dev/null)
 check_contains "unresolved placeholder reported" 'PAYLOAD' "$warning"
 
+# --- regressions from the 2026-07 audit ----------------------------------------------
+
+# The `command` backend has no stored seed by design. hs_seed_read has no `command` arm,
+# so routing the question through it always answered "no seed" and hs_open_session refused
+# before ssh was ever tried — the documented backend could not open a session at all.
+saved_backend=$HS_TOTP_BACKEND saved_cmd=${HS_TOTP_CMD:-} saved_otp=${HS_OTP:-}
+unset HS_OTP
+HS_TOTP_BACKEND=command HS_TOTP_CMD="echo 000000"
+hs_have_seed && PASSED=$((PASSED + 1)) || check "command backend reports a usable seed" yes no
+HS_TOTP_CMD=""
+hs_have_seed && check "command backend with no HS_TOTP_CMD is not usable" no yes || PASSED=$((PASSED + 1))
+HS_TOTP_BACKEND=none HS_TOTP_CMD=$saved_cmd
+HS_OTP=123456
+hs_have_seed && PASSED=$((PASSED + 1)) || check "explicit HS_OTP is always usable" yes no
+unset HS_OTP
+[ -n "$saved_otp" ] && HS_OTP=$saved_otp
+HS_TOTP_BACKEND=$saved_backend
+
+# `watch` read empty stdout as "the job finished". A dead master produces empty stdout too.
+# The transport status must reach the caller through the one channel that survives command
+# substitution — the exit code — because that is how hs_watch invokes it.
+hs_run() { return 255; }                       # master gone
+state=$(hs_job_state 12345); rc=$?
+check "transport failure surfaces as 255"      255 "$rc"
+check "transport failure yields no state"      ""  "$state"
+hs_run() { printf 'RUNNING\n'; }               # job is queued
+state=$(hs_job_state 12345); rc=$?
+check "running job reports its state"          RUNNING "$state"
+check "running job reports a clean status"     0       "$rc"
+hs_run() { return 0; }                         # left the queue: empty stdout, status 0
+state=$(hs_job_state 12345); rc=$?
+check "finished job is empty at status 0"      "|0" "$state|$rc"
+unset -f hs_run
+
+# The seed must never be built into an argv. Assert against the executable lines only —
+# checking the whole file matches the comment that explains the bug.
+totp_code=$(grep -v '^[[:space:]]*#' "$HS_ROOT/lib/totp.sh")
+check_contains "keychain backend pipes through security -i" "| security -i" "$totp_code"
+case "$totp_code" in
+  *'-w "$seed"'*) FAILED=$((FAILED + 1)); echo "FAIL  seed is passed in argv to security" ;;
+  *) PASSED=$((PASSED + 1)) ;;
+esac
+
 # --- CLI surface ---------------------------------------------------------------------
 help_text=$("$HS_ROOT/bin/hpc-session" --help)
 check_contains "help mentions open"   "hpc-session open"   "$help_text"
