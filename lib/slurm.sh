@@ -84,6 +84,17 @@ hs_submit() {
 
 hs_queue() { hs_run "squeue -u \$USER -o '%.10i %.20j %.9T %.10M %.6D %R'"; }
 
+# The state SLURM reports for a job on stdout; the TRANSPORT's status as the exit code.
+#
+# Callers must read both. Empty stdout means "not in the queue" only when the exit status
+# says the question was actually answered — a dropped master, an unreachable controller or
+# a mistyped job id all produce empty stdout too. `watch` used to read empty as proof of
+# completion, so an agent whose connection died was told its job had finished and stopped
+# looking at work that may still have been running.
+#
+# Deliberately not a global: `state=$(hs_job_state ...)` runs this in a subshell, where any
+# variable it sets is discarded. Command substitution does propagate the exit status, so
+# the status is the only channel that survives the way callers actually invoke this.
 hs_job_state() { hs_run "squeue -h -j '$1' -o '%T' 2>/dev/null"; }
 
 # sacct is not enabled on every site, so its absence must not look like a failure.
@@ -97,9 +108,13 @@ hs_job_accounting() {
 # `queue` for anything longer than a coffee.
 hs_watch() {
   [ -n "${1:-}" ] || hs_die "usage: watch <jobid> [interval_seconds]"
-  local job_id="$1" interval="${2:-30}" state
+  local job_id="$1" interval="${2:-30}" state rc
   while :; do
-    state=$(hs_job_state "$job_id")
+    state=$(hs_job_state "$job_id"); rc=$?
+    # 255 is ssh's own "I could not run anything" — the master went away, the VPN dropped,
+    # the host became unreachable. Never a statement about the job, so never a completion.
+    [ "$rc" -eq 255 ] && hs_die \
+      "lost the connection to $HS_HOST while watching job $job_id — not reporting it finished. Reopen and 'watch $job_id' again."
     [ -n "$state" ] || break
     hs_note "job $job_id: $state"
     sleep "$interval"
