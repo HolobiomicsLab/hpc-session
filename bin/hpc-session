@@ -85,6 +85,18 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# `init` creates a profile that by definition does not exist yet, so it must be dispatched
+# BEFORE the loader, which treats a missing named profile as fatal. Running it afterwards
+# made `-p <name> init` — the only profile selector README documents — refuse to create the
+# very profile it names. The remedy that error prints, `init <name>`, did still work, unless
+# HS_PROFILE was exported, in which case there was no in-band way out at all.
+if [ "${1:-}" = init ]; then
+  shift
+  HS_PROFILE="${1:-$HS_PROFILE}"
+  hs_init_profile
+  exit
+fi
+
 hs_load_profile
 
 case "${1:-}" in
@@ -92,7 +104,6 @@ case "${1:-}" in
   close)      shift; hs_close_session ;;
   status)     shift; hs_status ;;
   doctor)     shift; hs_doctor ;;
-  init)       shift; HS_PROFILE="${1:-$HS_PROFILE}"; hs_init_profile ;;
   code)       shift; hs_code || hs_die "no code available (backend '$HS_TOTP_BACKEND')" ;;
   store-seed) shift; hs_store_seed ;;
   ssh-opts)   shift; hs_ssh_opts; echo ;;

@@ -11,6 +11,31 @@ hs_note() { echo "hpc-session: $*" >&2; }
 
 hs_profile_path() { echo "$HS_CONFIG_DIR/${1}.conf"; }
 
+# Serialise the HS_* variables the caller put in the environment, as statements that
+# restore them. Only EXPORTED names are captured, which is precisely what "the environment"
+# means: a library assigning HS_SSH_ERROR at source time is not in it.
+#
+# Names come from `compgen -e` and values are quoted with `%q`, one statement per line.
+# Filtering the text of `export -p` instead would split a multi-line value — an
+# HS_VPN_UP_CMD spanning two lines is ordinary — leaving an unterminated quote that makes
+# `eval` abandon every override after it, silently.
+#
+# `export`, not `declare -x`: `declare` inside a function creates a FUNCTION-LOCAL
+# variable, so the replay would restore nothing and the bug this guards against would
+# come back unnoticed.
+#
+# An empty value counts as unset, which is how `:=` in hs_apply_defaults already treats
+# one; otherwise a bare `HS_HOST= hpc-session ...` would blank the profile's host.
+hs_env_overrides() {
+  local name
+  for name in $(compgen -e); do
+    case "$name" in HS_*) ;; *) continue ;; esac
+    [ -n "${!name}" ] || continue
+    printf 'export %s=%q\n' "$name" "${!name}"
+  done
+  return 0
+}
+
 # Defaults for every key a profile may set. Applied after the profile is sourced,
 # so a profile only states what it changes.
 hs_apply_defaults() {
@@ -41,17 +66,25 @@ hs_apply_defaults() {
   : "${HS_PYTHON:=python3}"
 }
 
-# Source the profile, then fill the gaps. Absent profile is fatal unless it is the
-# built-in default one, which lets `hpc-session init` and `--help` work on a fresh box.
+# Source the profile, replay the environment over it, then fill the gaps — the documented
+# precedence of environment > profile > defaults. Absent profile is fatal unless it is the
+# built-in default one, which lets `--help` work on a fresh box.
+#
+# The replay is what makes the precedence real. A profile is a shell fragment of plain
+# assignments, so sourcing it overwrites whatever the caller exported; `hs_apply_defaults`
+# cannot undo that, because `:=` skips any name the profile has just set.
 hs_load_profile() {
   HS_PROFILE="${HS_PROFILE:-default}"
-  local path; path=$(hs_profile_path "$HS_PROFILE")
+  local path overrides
+  path=$(hs_profile_path "$HS_PROFILE")
+  overrides=$(hs_env_overrides)
   if [ -f "$path" ]; then
     # shellcheck disable=SC1090  # user-owned config, sourced on purpose
     . "$path"
   elif [ "$HS_PROFILE" != default ]; then
     hs_die "no profile '$HS_PROFILE' at $path (run: hpc-session init $HS_PROFILE)"
   fi
+  eval "$overrides"
   hs_apply_defaults
 }
 
