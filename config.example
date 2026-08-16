@@ -1,6 +1,7 @@
 # hpc-session profile. Copy to ~/.config/hpc-session/<name>.conf (chmod 600).
 # Shell syntax — it is sourced. Anything already set in the environment wins, so
 # one-off overrides need no edit:  HS_HOST=other-login hpc-session status
+# An empty value counts as unset, so an empty override falls back to the profile.
 #
 # The only required key is HS_HOST. Everything else has a working default.
 
