@@ -4,7 +4,15 @@
 # Extract the job id from sbatch's chatter ("Submitted batch job 12345").
 hs_parse_job_id() { awk '/Submitted batch job/{print $NF; exit}'; }
 
-hs_remote_path() { echo "$HS_REMOTE_WORKDIR/$(basename "$1")"; }
+# Extract the workdir hs_submit asked the cluster to expand. Tagged rather than taken
+# verbatim for the same reason the job id is parsed rather than read whole: a login node's
+# shell startup may print module chatter onto the very same stdout.
+hs_parse_workdir() { sed -n 's/^hs_workdir=//p' | tail -1; }
+
+# Where a local script lands on the cluster: an already-resolved workdir, plus its basename.
+# The workdir is passed in rather than read from the profile because it must be the value
+# the CLUSTER expanded — see hs_submit.
+hs_remote_path() { echo "$1/$(basename "$2")"; }
 
 # Substitute the documented ${PLACEHOLDER}s in a job template. Extra KEY=VALUE pairs
 # become extra substitutions, so a template can carry job-specific fields too.
@@ -55,11 +63,16 @@ hs_submit_usage() { hs_die "usage: submit <script> [sbatch args...]"; }
 hs_submit() {
   [ $# -ge 1 ] || hs_submit_usage
   local script="$1"; shift
-  local remote="$script" output
+  local remote="$script" workdir output
   if [ -f "$script" ]; then
-    remote=$(hs_remote_path "$script")
-    # Double quotes on purpose: the REMOTE shell must expand a workdir like /scratch/$USER.
-    hs_run "mkdir -p \"$HS_REMOTE_WORKDIR\"" || hs_die "cannot create $HS_REMOTE_WORKDIR"
+    # Create the workdir and read it back in one round trip. Double quotes on purpose: the
+    # REMOTE shell expands a workdir like /scratch/$USER, and only it can — since OpenSSH
+    # 9.0 scp speaks SFTP and runs no remote shell, so an unexpanded $USER would reach the
+    # copy verbatim and submit would fail on every current client.
+    workdir=$(hs_run "mkdir -p \"$HS_REMOTE_WORKDIR\" && printf 'hs_workdir=%s\n' \"$HS_REMOTE_WORKDIR\"" \
+      | hs_parse_workdir) || hs_die "cannot create $HS_REMOTE_WORKDIR"
+    [ -n "$workdir" ] || hs_die "could not resolve $HS_REMOTE_WORKDIR on $HS_HOST"
+    remote=$(hs_remote_path "$workdir" "$script")
     hs_push "$script" "$remote" >/dev/null || hs_die "copying $script failed"
   fi
   output=$(hs_run "cd \"$HS_REMOTE_WORKDIR\" && sbatch $* \"$remote\"") || hs_die "sbatch failed: $output"
@@ -101,7 +114,11 @@ hs_fetch() {
   [ -n "${1:-}" ] || hs_die "usage: fetch <jobid> [destination_dir]"
   local job_id="$1" dest="${2:-.}" files file
   mkdir -p "$dest" || hs_die "cannot write to $dest"
-  files=$(hs_run "ls -1 \"$HS_REMOTE_WORKDIR\"/*$job_id* 2>/dev/null")
+  # `find`, not `ls`: given a matching DIRECTORY, ls prints its contents as bare relative
+  # names, which scp then resolves against the remote home instead of the workdir — quietly
+  # fetching an unrelated file and reporting it as job output. `! -type d` rather than
+  # `-type f` so a symlinked output, which ls did return, still comes back.
+  files=$(hs_run "find \"$HS_REMOTE_WORKDIR\" -maxdepth 1 ! -type d -name '*$job_id*' 2>/dev/null")
   [ -n "$files" ] || { hs_note "nothing matching '$job_id' in $HS_REMOTE_WORKDIR"; return 1; }
   printf '%s\n' "$files" | while IFS= read -r file; do
     [ -n "$file" ] || continue
