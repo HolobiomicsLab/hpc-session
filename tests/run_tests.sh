@@ -200,6 +200,27 @@ rm -rf "$fetch_dir" "$run_log"
 unset -f hs_run
 check_contains "fetch skips directories"    "! -type d"   "$fetch_cmd"
 check_contains "fetch does not descend"     "-maxdepth 1" "$fetch_cmd"
+
+# Run it against a real filesystem, because the interesting case is the operand itself:
+# find lstats it unless -H is given, so a workdir whose LAST component is a symlink
+# (`ln -s /scratch/$USER/jobs ~/jobs`) is never descended and every output silently
+# vanishes — reported as "nothing matching", which reads as "the job wrote nothing".
+sym_root=$(mktemp -d "${TMPDIR:-/tmp}/hstest.XXXXXX")
+mkdir -p "$sym_root/real/out-12345.d"
+: > "$sym_root/real/slurm-12345.out"
+: > "$sym_root/real/out-12345.d/inner.txt"
+ln -s "$sym_root/real" "$sym_root/jobs"
+HS_REMOTE_WORKDIR="$sym_root/jobs"
+hs_run() { /bin/sh -c "$*"; }        # a real remote would resolve these paths too
+hs_pull() { :; }
+sym_out=$(hs_fetch 12345 "$sym_root/dest" 2>/dev/null)
+unset -f hs_run hs_pull
+check_contains "fetch follows a symlinked workdir" "slurm-12345.out" "$sym_out"
+case "$sym_out" in
+  *inner.txt*) FAILED=$((FAILED + 1)); echo "FAIL  fetch descended into a job output directory" ;;
+  *) PASSED=$((PASSED + 1)) ;;
+esac
+rm -rf "$sym_root"
 case "$fetch_cmd" in
   *"ls -1"*) FAILED=$((FAILED + 1)); echo "FAIL  fetch still lists directory contents" ;;
   *) PASSED=$((PASSED + 1)) ;;
@@ -214,8 +235,9 @@ bad=$("$HS_ROOT/bin/hpc-session" push only-one-arg 2>&1); rc=$?
 check "push with one argument fails" 1 "$rc"
 check_contains "push explains itself" "usage: push" "$bad"
 
-# `init` ran after the loader, which treats a missing named profile as fatal — so the one
-# subcommand whose job is to create a profile was refused for every profile but `default`.
+# `init` ran after the loader, which treats a missing named profile as fatal, so it was
+# refused whenever the name arrived BEFORE the subcommand — via `-p`, the only selector
+# README documents, or an exported HS_PROFILE. The positional `init <name>` did work.
 init_dir=$(mktemp -d "${TMPDIR:-/tmp}/hstest.XXXXXX")/cfg
 HS_CONFIG_DIR="$init_dir" "$HS_ROOT/bin/hpc-session" -p bigiron init >/dev/null 2>&1
 check "-p <name> init creates the profile" 0 "$([ -f "$init_dir/bigiron.conf" ]; echo $?)"

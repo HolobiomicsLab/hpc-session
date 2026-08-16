@@ -116,9 +116,13 @@ hs_fetch() {
   mkdir -p "$dest" || hs_die "cannot write to $dest"
   # `find`, not `ls`: given a matching DIRECTORY, ls prints its contents as bare relative
   # names, which scp then resolves against the remote home instead of the workdir — quietly
-  # fetching an unrelated file and reporting it as job output. `! -type d` rather than
-  # `-type f` so a symlinked output, which ls did return, still comes back.
-  files=$(hs_run "find \"$HS_REMOTE_WORKDIR\" -maxdepth 1 ! -type d -name '*$job_id*' 2>/dev/null")
+  # fetching an unrelated file and reporting it as job output.
+  #
+  # `-H` because find otherwise lstats its own operand, so a workdir whose last component
+  # is a symlink — `ln -s /scratch/$USER/jobs ~/jobs`, an ordinary layout — would never be
+  # descended and every output would vanish. The glob this replaces resolved it silently.
+  # `! -type d` rather than `-type f` so a symlinked output, which ls did return, still comes.
+  files=$(hs_run "find -H \"$HS_REMOTE_WORKDIR\" -maxdepth 1 ! -type d -name '*$job_id*' 2>/dev/null")
   [ -n "$files" ] || { hs_note "nothing matching '$job_id' in $HS_REMOTE_WORKDIR"; return 1; }
   printf '%s\n' "$files" | while IFS= read -r file; do
     [ -n "$file" ] || continue
