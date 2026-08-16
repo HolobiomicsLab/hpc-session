@@ -24,8 +24,9 @@ hpc-session doctor          # no network — reports what is configured and what
 hpc-session status          # is the master up? the VPN? is a TOTP seed present?
 ```
 
-If no profile exists, run `hpc-session init` and tell the user which keys they must fill
-in (`HS_HOST` at minimum). Do not invent a hostname, account or partition — ask.
+If no profile exists, run `hpc-session init` — or `hpc-session -p <name> init` for a second
+cluster — and tell the user which keys they must fill in (`HS_HOST` at minimum). Do not
+invent a hostname, account or partition — ask.
 
 ## The one pattern
 

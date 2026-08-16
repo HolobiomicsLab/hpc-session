@@ -120,6 +120,7 @@ the people who run the machine.
 One file per cluster in `~/.config/hpc-session/`, selected with `-p`:
 
 ```bash
+hpc-session -p bigiron init          # create it
 hpc-session -p bigiron open
 hpc-session -p bigiron submit job.slurm
 ```
@@ -128,8 +129,17 @@ Every key is documented in [`config.example`](config.example). Anything already 
 the environment wins over the file, so one-off overrides need no edit:
 
 ```bash
-HS_SLURM_PARTITION=gpu hpc-session submit job.slurm
+HS_HOST=other-login hpc-session status
+HS_SLURM_PARTITION=gpu hpc-session render templates/job.slurm.tmpl JOB_NAME=x PAYLOAD='./run.sh'
 ```
+
+An empty value counts as unset, the same way an empty key in the profile falls back to the
+default, so an empty override falls back to the profile rather than clearing it.
+
+Note which command reads what: the `HS_SLURM_*` keys are consumed by `render`, when it
+fills in a template. `submit` sends the script exactly as it stands on disk, so overriding
+`HS_SLURM_PARTITION` around a `submit` changes nothing — pass the flag to `sbatch` instead,
+which `submit` forwards unchanged: `hpc-session submit job.slurm --partition=gpu`.
 
 ## VPN
 
@@ -182,8 +192,9 @@ parsing, config precedence, and the CLI's argument handling. No cluster required
 - One master per host alias. Two profiles pointing at the same alias share it.
 - `render` substitutes single-line values only; give `${PAYLOAD}` a script for anything
   longer.
-- `fetch` matches remote filenames containing the job id. A job whose outputs are named
-  otherwise needs `pull`.
+- `fetch` matches regular files directly in `HS_REMOTE_WORKDIR` whose name contains the
+  job id. A job that writes into a per-job *directory*, or names its outputs otherwise,
+  needs `pull`.
 - `sacct` is absent on some sites; `watch` then simply prints nothing after the job ends.
 
 ## Use as a Claude Code skill
