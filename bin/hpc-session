@@ -51,7 +51,7 @@ hs_doctor_tool() {  # tool name, why it is needed
 hs_doctor_totp() {
   [ "$HS_TOTP_BACKEND" = none ] && { hs_report totp ok "disabled (key-only login)"; return; }
   hs_have_seed && hs_report totp ok "seed readable via '$HS_TOTP_BACKEND'" \
-               || hs_report totp fail "no seed in '$HS_TOTP_BACKEND' — run: hpc-session store-seed"
+               || hs_report totp fail "$(hs_seed_hint)"
 }
 
 hs_doctor_vpn() {
@@ -65,7 +65,12 @@ hs_doctor() {
   echo "profile $HS_PROFILE ($(hs_profile_path "$HS_PROFILE"))"
   [ -n "$HS_HOST" ] && hs_report host ok "$HS_HOST" || hs_report host fail "HS_HOST is unset"
   hs_doctor_tool ssh "the whole tool depends on it"
-  [ "$HS_TOTP_BACKEND" = none ] || hs_doctor_tool "$HS_PYTHON" "needed to generate TOTP codes"
+  # The `command` backend is `eval "$HS_TOTP_CMD"` and never reaches Python, so demanding
+  # an interpreter it does not use reported a setup as broken when it was complete.
+  case "$HS_TOTP_BACKEND" in
+    none|command) ;;
+    *) hs_doctor_tool "$HS_PYTHON" "needed to generate TOTP codes" ;;
+  esac
   hs_doctor_totp
   hs_doctor_vpn
   if [ -n "$HS_HOST" ] && hs_ssh -G "$HS_HOST" >/dev/null 2>&1; then

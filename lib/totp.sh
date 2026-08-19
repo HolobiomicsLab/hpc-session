@@ -52,6 +52,20 @@ hs_have_seed() {
   hs_seed_read | grep -q . 2>/dev/null
 }
 
+# Why this profile cannot produce a code, phrased for the setting that is actually missing.
+#
+# Shared by open, doctor and status because bin/hpc-session documents `doctor` as the last
+# step of setup: telling a `command` user to run `store-seed` — for a backend that stores
+# nothing, and whose store-seed exits 1 saying exactly that — left them with no way forward
+# until they reached `open`, which is the one place the right message used to live.
+hs_seed_hint() {
+  if [ "$HS_TOTP_BACKEND" = command ]; then
+    echo "HS_TOTP_CMD is empty — set it to a command that prints one code"
+  else
+    echo "no seed in '$HS_TOTP_BACKEND' and no HS_OTP — run: hpc-session store-seed"
+  fi
+}
+
 hs_seed_to_code() {
   HS_TOTP_DIGITS="$HS_TOTP_DIGITS" HS_TOTP_PERIOD="$HS_TOTP_PERIOD" HS_TOTP_ALGO="$HS_TOTP_ALGO" \
     "$HS_PYTHON" -c "$HS_TOTP_PY"
@@ -79,10 +93,25 @@ hs_seed_store_backend() {
     # `-w` with no value is NOT the fix: it consumes the next argument as the password
     # rather than reading stdin, so it silently stores the wrong thing.
     #
-    # Quoting is safe unquoted-in-quotes here because hs_store_seed has already stripped
-    # whitespace and proved the value base32-decodes — [A-Z2-7=] contains no quote.
-    keychain) printf 'add-generic-password -U -s "%s" -a "%s" -l "%s TOTP seed" -T /usr/bin/security -w "%s"\n' \
-                "$HS_TOTP_SERVICE" "$HS_TOTP_ACCOUNT" "$HS_TOTP_SERVICE" "$seed" | security -i ;;
+    # The seed itself is safe between those quotes: hs_store_seed has already stripped
+    # whitespace and proved the value base32-decodes, and [A-Z2-7=] contains no quote.
+    # The two identifiers have no such guarantee, and `security -i` re-tokenises the line
+    # with its own quote handling, so a quote in either would inject further options into
+    # a command that runs against the user's keychain — where argv made them inert tokens.
+    # A NEWLINE counts: `security -i` executes one command per line, so a value carrying one
+    # does not merely inject options, it appends a whole second command. A single quote does
+    # not: both values land inside "%s" fields, where security's parser reads it literally.
+    #
+    # Refused rather than escaped: `security`'s parser is not documented well enough to
+    # invent an escaping scheme against, and no real service or account name needs any of
+    # these characters.
+    keychain)
+      local nl=$'\n'
+      case "$HS_TOTP_SERVICE$HS_TOTP_ACCOUNT" in
+        *[\"\\]*|*"$nl"*) hs_die "HS_TOTP_SERVICE and HS_TOTP_ACCOUNT must not contain a double quote, a backslash or a newline" ;;
+      esac
+      printf 'add-generic-password -U -s "%s" -a "%s" -l "%s TOTP seed" -T /usr/bin/security -w "%s"\n' \
+        "$HS_TOTP_SERVICE" "$HS_TOTP_ACCOUNT" "$HS_TOTP_SERVICE" "$seed" | security -i ;;
     pass)     printf '%s\n' "$seed" | pass insert -m -f "$HS_TOTP_PASS_ENTRY" >/dev/null ;;
     file)     (umask 077; printf '%s\n' "$seed" > "$HS_TOTP_FILE") ;;
     *)        hs_die "backend '$HS_TOTP_BACKEND' stores no seed (use keychain, pass or file)" ;;
