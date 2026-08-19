@@ -50,6 +50,14 @@ These are properties of the design, not bugs. They are documented so you can dec
 - **The control socket is a live, authenticated connection.** Anyone who can write to
   your `HS_CONTROL_DIR` as your user can use it without authenticating. The directory is
   created 0700; on a shared machine, keep it on local disk, and `close` when you are done.
+- **The keychain item is readable by `security` without a prompt.** `store-seed` creates
+  it with `-T /usr/bin/security`, so any process running as you can read the seed back
+  without the keychain asking — which is what makes unattended `open` work at all. Use
+  `pass`, the `command` backend or `HS_OTP` if you would rather not have that. For the
+  Relatedly, `HS_TOTP_SERVICE` and `HS_TOTP_ACCOUNT` may not contain a double quote, a
+  backslash or a newline: the storing command is parsed by `security` itself, one command
+  per line, so a quote would let a profile inject further options into it and a newline a
+  whole second command. An apostrophe is fine.
 - **`HS_TOTP_CMD` and the VPN hooks are executed.** They come from your own profile, but
   it means an attacker who can edit your profile can run code as you — the same exposure
   as your shell startup files.

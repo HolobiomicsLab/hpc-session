@@ -73,7 +73,7 @@ an agent transcript** — type it into the tool directly, in a terminal.
 
 | Backend | Set in the profile | Notes |
 |---|---|---|
-| `keychain` | `HS_TOTP_SERVICE`, `HS_TOTP_ACCOUNT` | macOS login Keychain. The first read raises a dialog — choose *Always Allow*. |
+| `keychain` | `HS_TOTP_SERVICE`, `HS_TOTP_ACCOUNT` | macOS login Keychain. `store-seed` grants `security` standing access, so reads do not prompt — see SECURITY.md. Neither value may contain a double quote, a backslash or a newline. |
 | `pass` | `HS_TOTP_PASS_ENTRY` | The standard unix password manager; GPG-encrypted at rest. |
 | `file` | `HS_TOTP_FILE` | A mode-0600 file. Simplest, weakest. Never inside a repository. |
 | `command` | `HS_TOTP_CMD` | Run anything that prints six digits, e.g. `oathtool --totp -b @~/.seed`, or a hardware token. Nothing is stored by this tool. |
