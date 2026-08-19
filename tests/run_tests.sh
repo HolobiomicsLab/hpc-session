@@ -17,6 +17,17 @@ HS_PROFILE=test
 PASSED=0
 FAILED=0
 
+# The real hs_run and friends are not usable offline — they reach hs_require_host and would
+# abort the suite — so the stateful blocks below stub them. Leaving a stub behind is worse
+# than either: a later test would silently exercise it and pass on nothing. Capture the real
+# definitions once, and put them back after every block that replaces one.
+HS_REAL_DEFS=$(declare -f hs_run hs_run_sh hs_push hs_pull hs_ensure_open)
+restore_lib() { eval "$HS_REAL_DEFS"; }
+
+# hs_run_sh sends the command on STDIN rather than in argv (see lib/session.sh), so a stub
+# standing in for the cluster reads it from there.
+remote_cmd() { cat; }
+
 check() {  # description, expected, actual
   if [ "$2" = "$3" ]; then
     PASSED=$((PASSED + 1))
@@ -176,7 +187,7 @@ push_log=$(mktemp "${TMPDIR:-/tmp}/hstest.XXXXXX")
 hs_ensure_open() { :; }
 hs_push() { printf '%s\n' "$2" > "$push_log"; }        # record the copy destination
 hs_run() {   # the CLUSTER expands $USER, and its shell startup chatters over the same stdout
-  case "$*" in
+  case "$(remote_cmd)" in
     *hs_workdir*) printf 'Loading module gcc/12\nhs_workdir=/scratch/realuser/jobs\n' ;;
     *sbatch*)     printf 'Submitted batch job 4711\n' ;;
     *)            return 0 ;;
@@ -187,17 +198,18 @@ check "submit prints only the job id"  4711 "$job_id"
 check "workdir reaches scp expanded"   "/scratch/realuser/jobs/job.slurm.tmpl" \
   "$(cat "$push_log" 2>/dev/null)"
 rm -f "$push_log"
-unset -f hs_ensure_open hs_push hs_run
+restore_lib
 
 # `ls -1` on a matching DIRECTORY prints its contents as bare relative names, which scp
 # resolves against the remote home — delivering an unrelated file as if it were job output.
 run_log=$(mktemp "${TMPDIR:-/tmp}/hstest.XXXXXX")
 fetch_dir=$(mktemp -d "${TMPDIR:-/tmp}/hstest.XXXXXX")
-hs_run() { printf '%s\n' "$*" > "$run_log"; }
+hs_run() { remote_cmd > "$run_log"; }
+hs_ensure_open() { :; }
 hs_fetch 12345 "$fetch_dir" >/dev/null 2>&1
 fetch_cmd=$(cat "$run_log" 2>/dev/null)
 rm -rf "$fetch_dir" "$run_log"
-unset -f hs_run
+restore_lib
 check_contains "fetch skips directories"    "! -type d"   "$fetch_cmd"
 check_contains "fetch does not descend"     "-maxdepth 1" "$fetch_cmd"
 
@@ -211,10 +223,11 @@ mkdir -p "$sym_root/real/out-12345.d"
 : > "$sym_root/real/out-12345.d/inner.txt"
 ln -s "$sym_root/real" "$sym_root/jobs"
 HS_REMOTE_WORKDIR="$sym_root/jobs"
-hs_run() { /bin/sh -c "$*"; }        # a real remote would resolve these paths too
+hs_run() { [ -t 0 ] && return 99; /bin/sh; }   # runs the piped command, as the remote sh would
+hs_ensure_open() { :; }
 hs_pull() { :; }
 sym_out=$(hs_fetch 12345 "$sym_root/dest" 2>/dev/null)
-unset -f hs_run hs_pull
+restore_lib
 check_contains "fetch follows a symlinked workdir" "slurm-12345.out" "$sym_out"
 case "$sym_out" in
   *inner.txt*) FAILED=$((FAILED + 1)); echo "FAIL  fetch descended into a job output directory" ;;
@@ -244,21 +257,233 @@ unset HS_OTP
 [ -n "$saved_otp" ] && HS_OTP=$saved_otp
 HS_TOTP_BACKEND=$saved_backend
 
-# `watch` read empty stdout as "the job finished". A dead master produces empty stdout too.
-# The transport status must reach the caller through the one channel that survives command
-# substitution — the exit code — because that is how hs_watch invokes it.
-hs_run() { return 255; }                       # master gone
+# `watch` read empty stdout as "the job finished". Empty stdout is also what a dead master,
+# a squeue behind a module, an invalid job id and a csh login shell all produce. The answer
+# must therefore carry proof that the controller was reached, and that proof must reach the
+# caller through the exit status — the one channel that survives the command substitution
+# `state=$(hs_job_state ...)` that hs_watch uses.
+#
+# Driven through a FAKE squeue on PATH and a stub that executes the piped command locally,
+# so the sentinel is really emitted and really parsed rather than asserted about.
+fake_bin=$(mktemp -d "${TMPDIR:-/tmp}/hstest.XXXXXX")
+cat > "$fake_bin/squeue" <<'SQUEUE'
+#!/bin/sh
+# squeue's contract for the four replies that matter. -o is honoured, so the tag under test
+# comes from the format string the tool sends rather than from this stub.
+fmt=; prev=
+for arg in "$@"; do [ "$prev" = -o ] && fmt=$arg; prev=$arg; done
+case "$FAKE_SQUEUE" in
+  running) printf '%s\n' "$fmt" | sed 's/%T/RUNNING/'; exit 0 ;;
+  gone)    exit 0 ;;                                     # answered: not in the queue
+  invalid) echo 'slurm_load_jobs error: Invalid job id specified' >&2; exit 1 ;;
+  missing) echo 'sh: squeue: command not found' >&2; exit 127 ;;
+esac
+SQUEUE
+chmod +x "$fake_bin/squeue"
+# Reads the command from stdin, as the remote sh does. The tty guard matters: if the
+# transport ever regresses to passing the command in argv, nothing is piped, and a bare
+# `/bin/sh` would block on the terminal — and execute whatever the developer typed. Fail
+# loudly instead.
+hs_run() { [ -t 0 ] && return 99; PATH="$fake_bin:$PATH" /bin/sh; }
+# hs_run_sh opens the session before it pipes, so this must be neutralised too or the
+# suite would reach the real ssh — and the network. restore_lib puts it back.
+hs_ensure_open() { :; }
+export FAKE_SQUEUE                             # the fake squeue is a separate process
+
+FAKE_SQUEUE=running; state=$(hs_job_state 12345); rc=$?
+check "a queued job reports its state"         RUNNING "$state"
+check "a queued job reports status 0"          0       "$rc"
+FAKE_SQUEUE=gone;    state=$(hs_job_state 12345); rc=$?
+check "an answered absence is status 1"        "|1"    "$state|$rc"
+FAKE_SQUEUE=invalid; state=$(hs_job_state 12345); rc=$?
+check "an invalid job id is not a completion"  2       "$rc"
+check_contains "and its diagnostic comes back" "Invalid job id" "$state"
+FAKE_SQUEUE=missing; state=$(hs_job_state 12345); rc=$?
+check "an absent squeue is not a completion"   2       "$rc"
+hs_run() { return 255; }                       # master gone: no sentinel reaches us at all
 state=$(hs_job_state 12345); rc=$?
-check "transport failure surfaces as 255"      255 "$rc"
-check "transport failure yields no state"      ""  "$state"
-hs_run() { printf 'RUNNING\n'; }               # job is queued
-state=$(hs_job_state 12345); rc=$?
-check "running job reports its state"          RUNNING "$state"
-check "running job reports a clean status"     0       "$rc"
-hs_run() { return 0; }                         # left the queue: empty stdout, status 0
-state=$(hs_job_state 12345); rc=$?
-check "finished job is empty at status 0"      "|0" "$state|$rc"
-unset -f hs_run
+check "a dead master is not a completion"      2       "$rc"
+
+# Login-shell independence. csh and tcsh have no `2>` operator — they read the `2` as an
+# argument and `>/dev/null` as an ordinary stdout redirection — so the tool's own remote
+# strings must not be handed to the account's login shell. Skipped where csh is absent.
+if command -v csh >/dev/null 2>&1; then
+  hs_run() { [ -t 0 ] && return 99; PATH="$fake_bin:$PATH" csh -c "$*"; }
+  FAKE_SQUEUE=running; state=$(hs_job_state 12345); rc=$?
+  check "a csh login shell still answers"      "RUNNING|0" "$state|$rc"
+fi
+restore_lib
+rm -rf "$fake_bin"
+
+# `watch` itself, which no test used to call — and it is the function the fix changes. Run
+# in a subshell because it may hs_die, and with a zero interval so the loop does not sleep.
+watch_tick=$(mktemp "${TMPDIR:-/tmp}/hstest.XXXXXX")
+watch_replies=$(mktemp "${TMPDIR:-/tmp}/hstest.XXXXXX")
+watch_final=""
+hs_job_state() {          # serve one scripted `rc:stdout` per poll, then the last forever
+  local n reply
+  n=$(cat "$watch_tick"); echo $((n + 1)) > "$watch_tick"
+  # A watch that believes a broken answer polls forever at interval 0. Cap it, so a
+  # regression here fails the assertions below instead of hanging the suite.
+  [ "$n" -le 20 ] || return 1
+  reply=$(sed -n "${n}p" "$watch_replies")
+  [ -n "$reply" ] || reply=$(tail -1 "$watch_replies")
+  printf '%s' "${reply#*:}"
+  return "${reply%%:*}"
+}
+hs_job_is_final() {       # 0 + the state only when accounting has a terminal one
+  [ -n "$watch_final" ] && hs_state_is_final "$watch_final" && printf '%s\n' "$watch_final"
+}
+hs_job_accounting()   { echo "accounting for $1"; }
+watch_run() {             # space-separated replies, optional accounting state
+  printf '%s\n' "$1" | tr ' ' '\n' > "$watch_replies"
+  watch_final="${2:-}"
+  echo 1 > "$watch_tick"
+  ( hs_watch 12345 0 ) 2>&1
+}
+
+out=$(watch_run "0:RUNNING 0:RUNNING 1:"); rc=$?
+check "watch exits 0 on a real completion"     0 "$rc"
+check_contains "and says the job left"         "left the queue" "$out"
+
+out=$(watch_run "0:RUNNING 2:boom"); rc=$?
+check "watch fails when the answers stop"      1 "$rc"
+case "$out" in
+  *"left the queue"*) FAILED=$((FAILED + 1)); echo "FAIL  watch called a lost connection a completion" ;;
+  *) PASSED=$((PASSED + 1)) ;;
+esac
+check_contains "and refuses in so many words"  "NOT reporting it finished" "$out"
+
+# Repeated misses, but accounting holds a TERMINAL state: the controller has merely
+# forgotten a job that did finish, which is what squeue does once one ages past MinJobAge.
+out=$(watch_run "0:RUNNING 2:gone 2:gone 2:gone" COMPLETED); rc=$?
+check "accounting evidence ends the watch"     0 "$rc"
+check_contains "and names the state it trusted" "COMPLETED" "$out"
+
+# The same misses with a job accounting still calls RUNNING must not end it.
+out=$(watch_run "0:RUNNING 2:gone 2:gone 2:gone" RUNNING); rc=$?
+check "a running job is never a completion"    1 "$rc"
+
+rm -f "$watch_tick" "$watch_replies"
+unset -f hs_job_state hs_job_is_final hs_job_accounting watch_run
+. "$HS_ROOT/lib/slurm.sh"
+
+# hs_job_is_final for real, through a fake sacct. This is the function that supplies the
+# positive evidence issue #8 asked for, and the watch harness above stubs it out.
+sacct_bin=$(mktemp -d "${TMPDIR:-/tmp}/hstest.XXXXXX")
+cat > "$sacct_bin/sacct" <<'SACCT'
+#!/bin/sh
+printf '%s\n' "$FAKE_SACCT"
+SACCT
+chmod +x "$sacct_bin/sacct"
+export FAKE_SACCT
+# The login shell chatters on stdout BEFORE the piped sh starts — the premise this whole
+# file is built on. An untagged parser would read "Loading" as the job's state.
+hs_run() { [ -t 0 ] && return 99; echo "Loading module gcc/12"; PATH="$sacct_bin:$PATH" /bin/sh; }
+hs_ensure_open() { :; }
+
+FAKE_SACCT='COMPLETED';  final=$(hs_job_is_final 12345); rc=$?
+check "a finished job is final"                "COMPLETED|0" "$final|$rc"
+FAKE_SACCT='CANCELLED by 1234'; final=$(hs_job_is_final 12345); rc=$?
+check "CANCELLED keeps only the state"         "CANCELLED|0" "$final|$rc"
+# One row per array task. First-row-wins would call this whole array finished while two of
+# its three tasks are still running — and this is the fallback for when squeue has stopped
+# answering, so it must not be weaker than the squeue path it stands in for.
+FAKE_SACCT='COMPLETED
+RUNNING
+RUNNING'
+final=$(hs_job_is_final 12345); rc=$?
+check "a partly finished array is not final"   1 "$rc"
+FAKE_SACCT='COMPLETED
+FAILED'
+final=$(hs_job_is_final 12345); rc=$?
+check "an array finished throughout is final"  0 "$rc"
+hs_run() { [ -t 0 ] && return 99; /bin/sh; }   # no sacct on PATH at all
+FAKE_SACCT=''; final=$(hs_job_is_final 12345); rc=$?
+check "absent sacct is not evidence"           "|1" "$final|$rc"
+rm -rf "$sacct_bin"
+restore_lib
+
+check "RUNNING is not terminal"    no  "$(hs_state_is_final RUNNING && echo yes || echo no)"
+check "COMPLETED is terminal"      yes "$(hs_state_is_final COMPLETED && echo yes || echo no)"
+check "an unknown state is not"    no  "$(hs_state_is_final WEIRD_NEW_STATE && echo yes || echo no)"
+
+# The keychain line is re-tokenised by `security -i`, so a quote or a newline in either
+# identifier would inject options — or a whole second command — into something running
+# against the user's keychain, where argv made them inert tokens. Refused, not escaped.
+#
+# `security` is SHADOWED for this block, and that is not belt-and-braces. The assertion is
+# safe only while the guard fires, which is precisely the condition it exists to detect: a
+# regression here would otherwise write to the login keychain of whoever ran the suite —
+# with the injected `-A` that lets any application read the item without a prompt. That
+# happened once, during review of this very change.
+keychain_bin=$(mktemp -d "${TMPDIR:-/tmp}/hstest.XXXXXX")
+keychain_log="$keychain_bin/called"
+printf '#!/bin/sh\ncat >> "%s"\necho "argv: $*" >> "%s"\n' "$keychain_log" "$keychain_log" \
+  > "$keychain_bin/security"
+chmod +x "$keychain_bin/security"
+poison_probe() {  # service, account
+  ( PATH="$keychain_bin:$PATH"
+    HS_TOTP_BACKEND=keychain HS_TOTP_SERVICE="$1" HS_TOTP_ACCOUNT="$2" \
+      hs_seed_store_backend AAAAAAAA ) 2>&1
+}
+poisoned=$(poison_probe 'x" -A -a "x' me); rc=$?
+check "a quoted service name is refused"       1 "$rc"
+check_contains "and says which keys"           "HS_TOTP_SERVICE" "$poisoned"
+# security -i runs one command per LINE, so a newline appends a second command outright.
+poisoned=$(poison_probe "svc" "me
+delete-keychain login.keychain"); rc=$?
+check "a newline in the account is refused"    1 "$rc"
+check "and nothing reached security"           0 "$([ ! -s "$keychain_log" ]; echo $?)"
+# A single quote is legitimate: both values land inside "%s" fields, where security reads
+# it literally. Refusing it would be a documented rule the code does not need.
+poison_probe "o'brien" me >/dev/null 2>&1
+check "an apostrophe is accepted"              0 "$([ -s "$keychain_log" ]; echo $?)"
+rm -rf "$keychain_bin"
+
+# `doctor` is documented as the last step of setup, so it must not send a `command` backend
+# user to store-seed — a subcommand that exits 1 saying it stores nothing.
+#
+# Asserted through the SUBCOMMANDS, not through hs_seed_hint alone. Testing only the new
+# helper would repeat exactly what issue #14 raised against #1's watch test: an assertion on
+# a function that proves nothing about the call sites the fix was actually about.
+doc_dir=$(mktemp -d "${TMPDIR:-/tmp}/hstest.XXXXXX")
+cat > "$doc_dir/cmdbackend.conf" <<'PROFILE'
+HS_HOST="cluster.invalid"
+HS_TOTP_BACKEND="command"
+HS_TOTP_CMD=""
+PROFILE
+doc_out=$(HS_CONFIG_DIR="$doc_dir" "$HS_ROOT/bin/hpc-session" -p cmdbackend doctor 2>&1)
+check_contains "doctor names the key to set" "HS_TOTP_CMD" "$doc_out"
+case "$doc_out" in
+  *store-seed*) FAILED=$((FAILED + 1)); echo "FAIL  doctor misdirects the command backend to store-seed" ;;
+  *) PASSED=$((PASSED + 1)) ;;
+esac
+# ...and must not demand an interpreter this backend's code path never reaches.
+case "$doc_out" in
+  *"needed to generate TOTP codes"*)
+     FAILED=$((FAILED + 1)); echo "FAIL  doctor demands python for the command backend" ;;
+  *) PASSED=$((PASSED + 1)) ;;
+esac
+cat > "$doc_dir/filebackend.conf" <<'PROFILE'
+HS_HOST="cluster.invalid"
+HS_TOTP_BACKEND="file"
+HS_TOTP_FILE="/nonexistent/seed"
+PROFILE
+doc_out=$(HS_CONFIG_DIR="$doc_dir" "$HS_ROOT/bin/hpc-session" -p filebackend doctor 2>&1)
+check_contains "a storing backend still hears store-seed" "store-seed" "$doc_out"
+rm -rf "$doc_dir"
+
+# status is the other misdirecting call site. Stubbed at hs_master_up so it stays offline.
+hs_real_master_up=$(declare -f hs_master_up)
+hs_master_up() { return 1; }
+status_out=$(HS_TOTP_BACKEND=command HS_TOTP_CMD="" HS_VPN_UP_CMD="" hs_status 2>&1)
+check_contains "status names the key to set" "HS_TOTP_CMD" "$status_out"
+case "$status_out" in
+  *store-seed*) FAILED=$((FAILED + 1)); echo "FAIL  status misdirects the command backend to store-seed" ;;
+  *) PASSED=$((PASSED + 1)) ;;
+esac
+eval "$hs_real_master_up"
 
 # The seed must never be built into an argv. Assert against the executable lines only —
 # checking the whole file matches the comment that explains the bug.
