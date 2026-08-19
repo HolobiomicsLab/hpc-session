@@ -144,10 +144,7 @@ hs_open_session() {
   # Verify we CAN authenticate BEFORE raising the tunnel: a full-tunnel VPN monopolises
   # the link, so failing afterwards would strand any other remote access.
   if [ "$HS_TOTP_BACKEND" != none ] && ! hs_have_seed; then
-    if [ "$HS_TOTP_BACKEND" = command ]; then
-      hs_die "HS_TOTP_BACKEND=command but HS_TOTP_CMD is empty — set it to a command that prints one code"
-    fi
-    hs_die "no TOTP seed stored and no HS_OTP. Run: hpc-session store-seed"
+    hs_die "cannot produce a TOTP code: $(hs_seed_hint)"
   fi
   hs_vpn_connect
   hs_open_with_retries
@@ -169,6 +166,29 @@ hs_ensure_open() { hs_master_up || hs_open_session || exit 1; }
 hs_run() {
   hs_ensure_open
   hs_ssh -o BatchMode=yes "$HS_HOST" "$@"
+}
+
+# Run one of THIS TOOL's OWN command strings on the cluster, through an explicit `sh`.
+#
+# `ssh host "cmd"` hands cmd to the account's LOGIN shell, and csh/tcsh have no `2>`
+# operator: they read the `2` as an argument and `>/dev/null` as an ordinary stdout
+# redirection. A remote string written in POSIX sh therefore did something else entirely on
+# a csh account — `squeue … 2>/dev/null` came back empty and non-zero, which `watch` read as
+# a finished job and `fetch` as an empty workdir.
+#
+# The command travels on STDIN, not in the argument list, so no shell tokenises it except
+# the `sh` that runs it. That leaves no quoting scheme to get right — and none that would
+# have to be right under sh and csh at once. Remote stdin is consumed as a result; none of
+# the tool's own remote commands read it.
+#
+# `hs_run` stays a raw pass-through: `hpc-session run` is the user's own command line, and
+# it belongs to the login shell they chose.
+hs_run_sh() {
+  # Open BEFORE the pipe. hs_run would open too, but from inside it — and raising the VPN
+  # runs an arbitrary user command (eval "$HS_VPN_UP_CMD") that is entitled to read stdin.
+  # It would read our command off it, and the remote sh would run whatever was left.
+  hs_ensure_open
+  printf '%s\n' "$*" | hs_run "exec sh -s"
 }
 
 # Run a LOCAL command with the multiplexed ssh exported, for tools that shell out to ssh
@@ -202,7 +222,7 @@ hs_status() {
     echo "totp:    disabled (key-only login)"
   else
     hs_have_seed && echo "totp:    seed present ($HS_TOTP_BACKEND)" \
-                 || echo "totp:    NO SEED (hpc-session store-seed)"
+                 || echo "totp:    NO CODE AVAILABLE — $(hs_seed_hint)"
   fi
   echo "profile: $HS_PROFILE -> $HS_HOST"
 }
