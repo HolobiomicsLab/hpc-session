@@ -97,6 +97,13 @@ another substitution. A placeholder left empty removes its whole `#SBATCH` line,
 unset account does not become an `--account=` that SLURM rejects. Keep `%j` in the
 `--output`/`--error` patterns — that is how `fetch` finds the files.
 
+`watch` never reports a completion it cannot evidence. It stops only when the controller
+answers that the job is not in the queue — or, if the queries themselves start failing,
+when `sacct` reports a state that is actually terminal. When neither happens it exits
+non-zero saying so, rather than printing the same "left the queue" line a real completion
+would print. A dropped connection, a `squeue` behind a module and a mistyped job id all
+used to be indistinguishable from a finished job.
+
 **On a full-tunnel VPN, do not leave `watch` running for a long job.** Close the session
 and come back to `hpc-session queue` later; the job does not care whether you are
 connected.
@@ -195,7 +202,13 @@ parsing, config precedence, and the CLI's argument handling. No cluster required
 - `fetch` matches regular files directly in `HS_REMOTE_WORKDIR` whose name contains the
   job id. A job that writes into a per-job *directory*, or names its outputs otherwise,
   needs `pull`.
-- `sacct` is absent on some sites; `watch` then simply prints nothing after the job ends.
+- `sacct` is absent on some sites; `watch` then prints nothing after the job ends, and
+  loses the fallback it would otherwise use to confirm a completion `squeue` stopped
+  answering for. On such a site a `watch` that loses its answers fails rather than
+  guessing, which is the intended direction.
+- The tool's own remote commands run under `sh` on the cluster, whatever login shell the
+  account uses. `hpc-session run` is left alone: that is your command line, and it belongs
+  to your login shell.
 
 ## Use as a Claude Code skill
 

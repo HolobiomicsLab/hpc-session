@@ -40,6 +40,8 @@ HS_VPN_STATUS_CMD=""
 # READ docs/2fa-enrollment.md BEFORE choosing anything but `none` or `command`:
 # storing the seed beside your SSH key puts both factors on one disk.
 HS_TOTP_BACKEND="none"
+# No double quote, backslash or newline in these two: `security` parses the command that
+# stores the seed, one command per line.
 HS_TOTP_SERVICE="hpc-session-totp"
 HS_TOTP_ACCOUNT=""
 HS_TOTP_PASS_ENTRY=""

@@ -80,6 +80,10 @@ hpc-session cancel <jobid>
   [docs/support-and-feedback.md](docs/support-and-feedback.md) rather than around it.
 - **Report what actually happened.** If a job fails, fetch the `.err` file and quote it
   rather than guessing from the exit status.
+- **A non-zero `watch` is not a finished job.** `watch` exits non-zero when it stops
+  getting usable answers about the job — a dropped master, a `squeue` that is not on the
+  non-interactive PATH, a controller restarting. Say the job's state is unknown and check
+  with `queue`; do not report it as complete. Only "job N left the queue" means that.
 - **Do not edit the user's `~/.ssh/config`** to add multiplexing. The tool passes its own
   options; `hpc-session ssh-opts` prints them for any external tool that needs the same
   connection.
