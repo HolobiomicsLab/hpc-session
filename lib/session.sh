@@ -141,8 +141,11 @@ hs_open_session() {
   mkdir -p "$HS_CONTROL_DIR" && chmod 700 "$HS_CONTROL_DIR"
   hs_clean_stale
   hs_master_up && { hs_note "master already up"; return 0; }
-  # Verify we CAN authenticate BEFORE raising the tunnel: a full-tunnel VPN monopolises
-  # the link, so failing afterwards would strand any other remote access.
+  # Verify a code can be PRODUCED before raising the tunnel — not that it will be
+  # accepted, which cannot be tested from here: under a full tunnel the login node is
+  # usually unreachable until the tunnel is up. Catching the common failure early is still
+  # worth it, because that tunnel monopolises the link, and failing after raising it would
+  # strand any other remote access for no reason.
   if [ "$HS_TOTP_BACKEND" != none ] && ! hs_have_seed; then
     hs_die "cannot produce a TOTP code: $(hs_seed_hint)"
   fi
@@ -192,8 +195,14 @@ hs_run_sh() {
 }
 
 # Run a LOCAL command with the multiplexed ssh exported, for tools that shell out to ssh
-# themselves (rsync, git, sshfs). This is the distinction `run` alone cannot express:
-# `run rsync local_file host:/path` would look for local_file ON THE CLUSTER.
+# themselves. This is the distinction `run` alone cannot express: `run rsync local_file
+# host:/path` would look for local_file ON THE CLUSTER.
+#
+# Only tools that read RSYNC_RSH or GIT_SSH_COMMAND, which is to say rsync and git.
+# sshfs was listed here and honours neither — it takes its transport from `-o ssh_command=`
+# — so `hpc-session local sshfs ...` opened a second, unmultiplexed connection, which under
+# TOTP means a second authentication: the exact thing this tool exists to avoid. See
+# README for the invocation that does share the master.
 hs_local() {
   hs_ensure_open
   RSYNC_RSH="ssh $(hs_ssh_opts)" GIT_SSH_COMMAND="ssh $(hs_ssh_opts)" "$@"

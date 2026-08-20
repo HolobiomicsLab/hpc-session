@@ -44,8 +44,11 @@ because the PAM module refuses to reuse a code.
 ## Run things in the right place
 
 - `hpc-session run <cmd>` — runs **on the cluster**.
-- `hpc-session local <cmd>` — runs **on this machine** over the same connection. This is
-  what `rsync`, `git` and `sshfs` need.
+- `hpc-session local <cmd>` — runs **on this machine** over the same connection. It works
+  by exporting `RSYNC_RSH` and `GIT_SSH_COMMAND`, so it is what `rsync` and `git` need.
+  A tool that reads neither must be told directly, or it opens a second connection and
+  costs a second code — `sshfs` takes
+  `-o ssh_command="ssh $(hpc-session ssh-opts)"`.
 - `hpc-session push <local> <remote>` / `pull <remote> <local>` — single-file copies.
 
 `run rsync ./data host:/scratch/` is a mistake: `./data` would be looked up on the

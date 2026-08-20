@@ -68,7 +68,7 @@ The distinction that bites people:
 | Command | Runs where | Use for |
 |---|---|---|
 | `hpc-session run <cmd>` | on the cluster | `squeue`, `sbatch`, `ls`, a compute job |
-| `hpc-session local <cmd>` | on your machine, over the shared connection | `rsync`, `git`, `sshfs` |
+| `hpc-session local <cmd>` | on your machine, over the shared connection | `rsync`, `git` |
 | `hpc-session push <local> <remote>` | copy up | one file |
 | `hpc-session pull <remote> <local>` | copy down | one file |
 
@@ -77,6 +77,15 @@ That is what `local` is for:
 
 ```bash
 hpc-session local rsync -a ./data/ mycluster:/scratch/$USER/data/
+```
+
+`local` works by exporting `RSYNC_RSH` and `GIT_SSH_COMMAND`, so it helps exactly the
+tools that read them. A tool that takes its transport some other way needs to be told
+directly — `sshfs`, for instance, reads neither, and would otherwise open a second
+connection, which under 2FA costs a second code:
+
+```bash
+sshfs -o ssh_command="ssh $(hpc-session ssh-opts)" mycluster:/scratch/$USER ~/mnt
 ```
 
 ### SLURM
