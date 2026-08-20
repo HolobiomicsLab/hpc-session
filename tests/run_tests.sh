@@ -104,6 +104,38 @@ check "job id ignores noise" 777 \
   "$(printf 'warning: partition busy\nSubmitted batch job 777\n' | hs_parse_job_id)"
 check "job id absent" "" "$(printf 'sbatch: error: invalid account\n' | hs_parse_job_id)"
 
+# `$NF` took the CLUSTER NAME from sbatch's second documented form, and hs_submit printed
+# it on stdout as the job id — the value SKILL.md tells an agent to capture and then watch,
+# fetch and cancel.
+check "job id, not the cluster name" 12345 \
+  "$(printf 'Submitted batch job 12345 on cluster tiger\n' | hs_parse_job_id)"
+check "job id behind a plugin prefix" 999 \
+  "$(printf 'sbatch: Submitted batch job 999\n' | hs_parse_job_id)"
+# --parsable prints no message at all, so requiring the phrase killed submit AFTER the job
+# was queued — and a caller retrying on non-zero submitted it twice.
+check "job id from --parsable"         4242 "$(printf '4242\n' | hs_parse_job_id)"
+check "job id from --parsable cluster" 4242 "$(printf '4242;tiger\n' | hs_parse_job_id)"
+
+# What may reach a remote command line as a job id: SLURM's own forms, and nothing else.
+valid_id() { hs_valid_job_id "$1" && echo yes || echo no; }
+check "a plain job id"        yes "$(valid_id 12345)"
+check "an array task"         yes "$(valid_id 12345_7)"
+check "a pending array range" yes "$(valid_id '12345_[1-3]')"
+check "a het component"       yes "$(valid_id 12345+0)"
+check "a job step"            yes "$(valid_id 12345.0)"
+check "a cluster name"        no  "$(valid_id tiger)"
+check "a trailing command"    no  "$(valid_id '12345; rm -rf /')"
+check "an embedded quote"     no  "$(valid_id "12345'")"
+check "a substitution"        no  "$(valid_id '$(id -u)')"
+check "nothing at all"        no  "$(valid_id '')"
+unset -f valid_id
+
+# Round-tripped through a REAL sh, the way hs_run_sh delivers it. An assertion on the
+# quoted string alone would pass for a scheme sh happens to read differently.
+shq=$(printf 'for a in%s\ndo printf "<%%s>" "$a"\ndone\n' \
+  "$(hs_shquote "a b" '$(echo SUBSTITUTED)' "it's" 'x;y')" | /bin/sh -s)
+check "shquote survives a real sh" "<a b><\$(echo SUBSTITUTED)><it's><x;y>" "$shq"
+
 HS_REMOTE_WORKDIR="/scratch/me/jobs"
 check "remote path" "/scratch/me/jobs/job.slurm" \
   "$(hs_remote_path /scratch/me/jobs ./local/dir/job.slurm)"
@@ -194,10 +226,13 @@ HS_HOST=cluster HS_REMOTE_WORKDIR='/scratch/$USER/jobs'
 push_log=$(mktemp "${TMPDIR:-/tmp}/hstest.XXXXXX")
 hs_ensure_open() { :; }
 hs_push() { printf '%s\n' "$2" > "$push_log"; }        # record the copy destination
+submit_log=$(mktemp "${TMPDIR:-/tmp}/hstest.XXXXXX")
+submit_reply='Submitted batch job 4711'
 hs_run() {   # the CLUSTER expands $USER, and its shell startup chatters over the same stdout
-  case "$(remote_cmd)" in
+  local cmd; cmd=$(remote_cmd)
+  case "$cmd" in
     *hs_workdir*) printf 'Loading module gcc/12\nhs_workdir=/scratch/realuser/jobs\n' ;;
-    *sbatch*)     printf 'Submitted batch job 4711\n' ;;
+    *sbatch*)     printf '%s\n' "$cmd" > "$submit_log"; printf '%s\n' "$submit_reply" ;;
     *)            return 0 ;;
   esac
 }
@@ -205,7 +240,43 @@ job_id=$(hs_submit "$HS_ROOT/templates/job.slurm.tmpl" 2>/dev/null)
 check "submit prints only the job id"  4711 "$job_id"
 check "workdir reaches scp expanded"   "/scratch/realuser/jobs/job.slurm.tmpl" \
   "$(cat "$push_log" 2>/dev/null)"
-rm -f "$push_log"
+
+# README promises extra arguments reach sbatch unchanged. `sbatch $*` handed every one of
+# them to the remote shell to re-parse: double quotes there do not suppress command
+# substitution, and $* had already lost the boundaries between arguments.
+job_id=$(hs_submit "$HS_ROOT/templates/job.slurm.tmpl" '--comment=$(id -u)' 'a b' 2>/dev/null)
+submit_cmd=$(cat "$submit_log" 2>/dev/null)
+check_contains "an argument with a space stays one" "'a b'" "$submit_cmd"
+check_contains "a substitution reaches sbatch inert" "'--comment=\$(id -u)'" "$submit_cmd"
+check_contains "the script path is quoted too" "'/scratch/realuser/jobs/job.slurm.tmpl'" "$submit_cmd"
+# The workdir is the one value still expanded by the cluster, because a profile's $USER can
+# only be resolved there.
+check_contains "but the workdir still expands remotely" 'cd "/scratch/$USER/jobs"' "$submit_cmd"
+
+# Whatever comes back out of the parser is the value SKILL.md tells an agent to capture and
+# then hand to watch, fetch and cancel. Anything that is not a job id has to be refused
+# HERE — and the refusal has to say the job is probably queued, because a caller that reads
+# a non-zero submit as "it did not happen" will submit it again.
+submit_reply='Submitted batch job array 4711'
+out=$( hs_submit "$HS_ROOT/templates/job.slurm.tmpl" 2>&1 ); rc=$?
+check "a non-id from sbatch is refused"        1 "$rc"
+check_contains "and the queue is not assumed empty" "hpc-session queue" "$out"
+
+submit_reply='sbatch: submitted, have a nice day'
+out=$( hs_submit "$HS_ROOT/templates/job.slurm.tmpl" 2>&1 ); rc=$?
+check "an unreadable reply is refused"         1 "$rc"
+check_contains "and warns against resubmitting" "before resubmitting" "$out"
+
+# Federated submission is out of scope — nothing here passes -M, so the id would be queried
+# against the default cluster and match nothing. Say so rather than failing silently later.
+submit_reply='Submitted batch job 4711 on cluster tiger'
+out=$( hs_submit "$HS_ROOT/templates/job.slurm.tmpl" 2>&1 >/dev/null ); rc=$?
+check "a federated submit still succeeds"      0 "$rc"
+check_contains "and warns which cluster is queried" "another cluster" "$out"
+check "and still prints the job id" 4711 "$(hs_submit "$HS_ROOT/templates/job.slurm.tmpl" 2>/dev/null)"
+
+rm -f "$push_log" "$submit_log"
+unset submit_reply
 restore_lib
 
 # `ls -1` on a matching DIRECTORY prints its contents as bare relative names, which scp
@@ -220,6 +291,40 @@ rm -rf "$fetch_dir" "$run_log"
 restore_lib
 check_contains "fetch skips directories"    "! -type d"   "$fetch_cmd"
 check_contains "fetch does not descend"     "-maxdepth 1" "$fetch_cmd"
+
+# fetch and cancel take a caller-supplied id straight into a remote string. The caller is
+# increasingly an agent passing a value it read out of a file or an API response, so the
+# id is checked before it can become part of a command line — not after.
+refuse_log=$(mktemp "${TMPDIR:-/tmp}/hstest.XXXXXX")
+hs_run() { remote_cmd > "$refuse_log"; }
+hs_ensure_open() { :; }
+hs_pull() { :; }
+: > "$refuse_log"
+out=$( hs_cancel "12345' ; touch /tmp/hs-pwned" 2>&1 ); rc=$?
+check "cancel refuses a non-id"             1 "$rc"
+check "and asked the cluster nothing"       0 "$(status_of test ! -s "$refuse_log")"
+: > "$refuse_log"
+out=$( hs_fetch '$(id -u)' "$TMPDIR" 2>&1 ); rc=$?
+check "fetch refuses a non-id"              1 "$rc"
+check "and fetched nothing either"          0 "$(status_of test ! -s "$refuse_log")"
+rm -f "$refuse_log"
+restore_lib
+
+# `%.10i` hard-cuts rather than elides, so the array task 12345678_10 was DISPLAYED as
+# 12345678_1 — a valid id for a different task of the same array, which a reader would then
+# have passed to cancel.
+queue_log=$(mktemp "${TMPDIR:-/tmp}/hstest.XXXXXX")
+hs_run() { remote_cmd > "$queue_log"; }
+hs_ensure_open() { :; }
+hs_queue >/dev/null 2>&1
+queue_cmd=$(cat "$queue_log" 2>/dev/null)
+rm -f "$queue_log"
+restore_lib
+check_contains "queue asks for the whole job id" "'%i " "$queue_cmd"
+case "$queue_cmd" in
+  *%.[0-9]*i*) FAILED=$((FAILED + 1)); echo "FAIL  queue still truncates the job id" ;;
+  *) PASSED=$((PASSED + 1)) ;;
+esac
 
 # Run it against a real filesystem, because the interesting case is the operand itself:
 # find lstats it unless -H is given, so a workdir whose LAST component is a symlink
@@ -324,7 +429,18 @@ restore_lib
 rm -rf "$fake_bin"
 
 # `watch` itself, which no test used to call — and it is the function the fix changes. Run
-# in a subshell because it may hs_die, and with a zero interval so the loop does not sleep.
+# in a subshell because it may hs_die.
+#
+# `sleep` and `date` are shadowed for this block. The interval floor means a zero interval
+# is no longer honoured by default, so without a stub the suite would sit out a real 30
+# seconds per poll; and the duration cap is measured in wall-clock seconds, which a test
+# must be able to move without spending any. Neither is used anywhere else in this path.
+sleep() { :; }
+watch_clock=$(mktemp "${TMPDIR:-/tmp}/hstest.XXXXXX")
+echo 0 > "$watch_clock"
+date() {                  # every reading is 100s after the last
+  local n; n=$(cat "$watch_clock"); echo $((n + 100)) > "$watch_clock"; printf '%s\n' "$n"
+}
 watch_tick=$(mktemp "${TMPDIR:-/tmp}/hstest.XXXXXX")
 watch_replies=$(mktemp "${TMPDIR:-/tmp}/hstest.XXXXXX")
 watch_final=""
@@ -343,12 +459,17 @@ hs_job_is_final() {       # 0 + the state only when accounting has a terminal on
   [ -n "$watch_final" ] && hs_state_is_final "$watch_final" && printf '%s\n' "$watch_final"
 }
 hs_job_accounting()   { echo "accounting for $1"; }
-watch_run() {             # space-separated replies, optional accounting state
+watch_run() {             # replies, [accounting state], [interval]
   printf '%s\n' "$1" | tr ' ' '\n' > "$watch_replies"
   watch_final="${2:-}"
   echo 1 > "$watch_tick"
-  ( hs_watch 12345 0 ) 2>&1
+  echo 0 > "$watch_clock"
+  ( hs_watch 12345 "${3:-0}" ) 2>&1
 }
+# The completion assertions below are about the completion logic, so they opt out of the
+# polling limits; each limit has its own assertions further down.
+HS_WATCH_MIN_INTERVAL=0
+HS_WATCH_MAX_SECONDS=0
 
 out=$(watch_run "0:RUNNING 0:RUNNING 1:"); rc=$?
 check "watch exits 0 on a real completion"     0 "$rc"
@@ -372,8 +493,49 @@ check_contains "and names the state it trusted" "COMPLETED" "$out"
 out=$(watch_run "0:RUNNING 2:gone 2:gone 2:gone" RUNNING); rc=$?
 check "a running job is never a completion"    1 "$rc"
 
-rm -f "$watch_tick" "$watch_replies"
-unset -f hs_job_state hs_job_is_final hs_job_accounting watch_run
+# The polling limits. docs/cluster-etiquette.md and SKILL.md state both of these as rules,
+# and SKILL.md is read by an agent, which will assume a stated rule is enforced. Until now
+# `watch 12345 0` was a busy-wait against the controller holding an authenticated master
+# open — from a tool whose own documentation forbids exactly that.
+out=$( HS_WATCH_MIN_INTERVAL=30 watch_run "0:RUNNING 1:" "" 5 ); rc=$?
+check "a completion still ends the watch"      0 "$rc"
+check_contains "a short interval is raised"    "polling every 30s, not 5s" "$out"
+
+out=$( HS_WATCH_MIN_INTERVAL=30 watch_run "0:RUNNING 1:" "" 60 ); rc=$?
+case "$out" in
+  *"polling every"*) FAILED=$((FAILED + 1)); echo "FAIL  watch clamped an interval it should have honoured" ;;
+  *) PASSED=$((PASSED + 1)) ;;
+esac
+
+# The cap. The replies never end, so only the cap can stop this.
+out=$( HS_WATCH_MAX_SECONDS=60 watch_run "0:RUNNING" ); rc=$?
+check "watch stops at the duration cap"        3 "$rc"
+check_contains "and names the key that did it" "HS_WATCH_MAX_SECONDS" "$out"
+check_contains "and says how to come back"     "hpc-session queue" "$out"
+case "$out" in
+  *"left the queue"*) FAILED=$((FAILED + 1)); echo "FAIL  the duration cap reported a completion" ;;
+  *) PASSED=$((PASSED + 1)) ;;
+esac
+
+# ...and zero means no cap, which is what the endless replies then run into: the harness's
+# own 20-poll guard, which answers 1 and so reads as a completion.
+out=$( HS_WATCH_MAX_SECONDS=0 watch_run "0:RUNNING" ); rc=$?
+check "a zero cap keeps polling"               0 "$rc"
+
+# Arguments, before any of it reaches the cluster.
+out=$( watch_run "0:RUNNING 1:" "" abc ); rc=$?
+check "a non-numeric interval is refused"      1 "$rc"
+check_contains "and says what it wanted"       "whole number of seconds" "$out"
+
+out=$( hs_watch '12345; touch /tmp/hs-pwned' 0 2>&1 ); rc=$?
+check "watch refuses a non-id"                 1 "$rc"
+check_contains "and says why"                  "not a job id" "$out"
+check "and no command ran"                     0 "$(status_of test ! -e /tmp/hs-pwned)"
+
+rm -f "$watch_tick" "$watch_replies" "$watch_clock"
+unset -f hs_job_state hs_job_is_final hs_job_accounting watch_run sleep date
+unset HS_WATCH_MIN_INTERVAL HS_WATCH_MAX_SECONDS
+hs_apply_defaults
 . "$HS_ROOT/lib/slurm.sh"
 
 # hs_job_is_final for real, through a fake sacct. This is the function that supplies the

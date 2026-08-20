@@ -1,8 +1,60 @@
 # SLURM helpers. Every one of them rides the master opened by session.sh, so a whole
 # submit/watch/fetch cycle costs at most one authentication.
 
-# Extract the job id from sbatch's chatter ("Submitted batch job 12345").
-hs_parse_job_id() { awk '/Submitted batch job/{print $NF; exit}'; }
+# Extract the job id from sbatch's chatter.
+#
+# Not `$NF`. sbatch's message has a second documented form — "Submitted batch job 12345
+# on cluster tiger" — where the last field is the CLUSTER NAME, and hs_submit would then
+# print `tiger` on stdout as the job id. That is the value SKILL.md tells callers to
+# capture with `job=$(hpc-session submit job.slurm)`, so an agent would go on to `watch
+# tiger` and `fetch tiger`. Reading the field after the word "job" also survives a site
+# plugin or `sbatch -v` prefixing the line.
+#
+# The second rule is `--parsable`, which prints the bare id (or "id;cluster") and no
+# message at all. Requiring the exact phrase meant hs_submit died AFTER the job was
+# queued, and a caller that retries on non-zero submitted it twice.
+hs_parse_job_id() {
+  awk '
+    /Submitted batch job/ { for (i = 1; i < NF; i++) if ($i == "job") { print $(i + 1); exit } }
+    /^[0-9]+(;[^;]*)?$/   { sub(/;.*/, "", $0); print; exit }
+  '
+}
+
+# Quote arguments for the REMOTE shell: wrap each in single quotes, closing and reopening
+# the quoting around any single quote inside it. POSIX, and therefore correct under the
+# `sh` hs_run_sh pipes into — `printf %q` is not, since bash emits $'...' for control
+# characters, which plain sh reads as a literal dollar sign.
+hs_shquote() {
+  # sq and esc are variables because the escaping needed to write '\'' as a literal inside
+  # a double-quoted ${var//pat/rep} is its own trap: a backslash before a single quote is
+  # NOT special in double quotes, so the obvious spelling ships a stray backslash.
+  local arg out="" sq="'" esc="'\\''"
+  for arg in "$@"; do
+    out="$out '${arg//$sq/$esc}'"
+  done
+  printf '%s' "$out"
+}
+
+# What may reach a remote command line as a job id.
+#
+# SLURM's own forms are a plain number, an array task (12345_7), a pending array range
+# (12345_[1-3]), a job step (12345.0) and a het component (12345+0), so the whitelist has
+# to admit the punctuation SLURM itself prints — and nothing else. What it excludes is the
+# point: no quote, no backslash, no `$`, no semicolon, so the value stays inert inside the
+# single quotes every remote string in this file wraps it in.
+#
+# This matters more than it used to. The caller is increasingly an agent passing a value
+# it derived from a file, an API response, or the output of a previous command.
+hs_valid_job_id() {
+  [ -n "${1:-}" ] || return 1
+  case "$1" in [0-9]*) ;; *) return 1 ;; esac
+  [ -z "$(printf '%s' "$1" | tr -d '0-9_.+,[]-')" ]
+}
+
+hs_require_job_id() {
+  hs_valid_job_id "${1:-}" && return 0
+  hs_die "not a job id: '${1:-}' — expected a number, optionally with an array task (12345_7), a step (12345.0) or a het component (12345+0)"
+}
 
 # Extract the workdir hs_submit asked the cluster to expand. Tagged rather than taken
 # verbatim for the same reason the job id is parsed rather than read whole: a login node's
@@ -75,14 +127,34 @@ hs_submit() {
     remote=$(hs_remote_path "$workdir" "$script")
     hs_push "$script" "$remote" >/dev/null || hs_die "copying $script failed"
   fi
-  output=$(hs_run_sh "cd \"$HS_REMOTE_WORKDIR\" && sbatch $* \"$remote\"") || hs_die "sbatch failed: $output"
+  # `sbatch $*` let the REMOTE shell re-parse every extra argument: double quotes do not
+  # suppress command substitution there, and $* had already lost the argument boundaries.
+  # README promises these reach sbatch "unchanged", and now they do.
+  #
+  # The script path is quoted too, so it is taken literally. HS_REMOTE_WORKDIR is the one
+  # value still expanded by the cluster — deliberately, because it is where a `$USER` in a
+  # profile has to be resolved, and only the far end can do that.
+  output=$(hs_run_sh "cd \"$HS_REMOTE_WORKDIR\" && sbatch$(hs_shquote "$@" "$remote")") \
+    || hs_die "sbatch failed: $output"
   local job_id; job_id=$(printf '%s\n' "$output" | hs_parse_job_id)
-  [ -n "$job_id" ] || hs_die "could not read a job id from: $output"
+  # The job is QUEUED by now. Saying so matters: a caller that treats a non-zero submit as
+  # "it did not happen" and retries would submit it twice.
+  [ -n "$job_id" ] || hs_die "sbatch ran but printed no job id I could read, so the job may well be queued — check with 'hpc-session queue' before resubmitting. It said: $output"
+  hs_valid_job_id "$job_id" || hs_die "sbatch printed something that is not a job id ('$job_id') — the job may be queued; check with 'hpc-session queue'. It said: $output"
+  # Multi-cluster submission is out of scope: nothing else here passes -M, so the id would
+  # be queried against the default cluster and quietly match nothing.
+  case "$output" in
+    *" on cluster "*)
+      hs_note "sbatch reports job $job_id on another cluster — watch, fetch and cancel query $HS_HOST only" ;;
+  esac
   hs_note "submitted job $job_id ($remote)"
   echo "$job_id"
 }
 
-hs_queue() { hs_run_sh "squeue -u \$USER -o '%.10i %.20j %.9T %.10M %.6D %R'"; }
+# No width on the id. SLURM hard-cuts rather than eliding, so `%.10i` displayed the array
+# task 12345678_10 as 12345678_1 — a valid id for a DIFFERENT task, which `cancel` would
+# then have killed. A ragged column is the lesser problem.
+hs_queue() { hs_run_sh "squeue -u \$USER -o '%i %.20j %.9T %.10M %.6D %R'"; }
 
 # Ask the controller for a job's state, and prove it was actually asked.
 #
@@ -171,12 +243,33 @@ hs_job_accounting() {
 #
 # Polling holds the link. On a full-tunnel VPN, prefer `close` and come back later with
 # `queue` for anything longer than a coffee.
+#
+# Exit status is the contract, because the caller may be an agent:
+#   0 — the job left the queue. The only status that means "finished".
+#   1 — refused, or lost track of the job. Its state is UNKNOWN, not final.
+#   3 — stopped at the duration cap. The job is still queued and still running.
+#
+# The floor and the cap exist because docs/cluster-etiquette.md and SKILL.md state both as
+# rules ("poll on the order of a minute, not a second"; "do not sit in watch for a job
+# measured in hours") and nothing enforced either. `watch 12345 0` was a busy-wait against
+# the controller, holding an authenticated master open, from a tool whose own documentation
+# forbids it. A rule written in an agent-facing skill is a rule the agent will assume is
+# enforced.
 hs_watch() {
   [ -n "${1:-}" ] || hs_die "usage: watch <jobid> [interval_seconds]"
-  local job_id="$1" interval="${2:-30}" state rc final misses=0
-  # A query that fails is retried rather than believed. slurmctld restarting answers briefly
-  # with nothing, and so does a job that aged past MinJobAge between two long polls.
-  local max_misses=3
+  hs_require_job_id "$1"
+  local job_id="$1" interval="${2:-$HS_WATCH_INTERVAL}" state rc final misses=0
+  local max_misses="$HS_WATCH_MAX_MISSES" cap="$HS_WATCH_MAX_SECONDS" started elapsed=0
+  case "$interval" in
+    ''|*[!0-9]*) hs_die "watch interval must be a whole number of seconds, not '$interval'" ;;
+  esac
+  # Say what was clamped. Silently obeying leaves the caller polling far harder than it
+  # believes; silently ignoring leaves it believing a number that never took effect.
+  if [ "$interval" -lt "$HS_WATCH_MIN_INTERVAL" ]; then
+    hs_note "polling every ${HS_WATCH_MIN_INTERVAL}s, not ${interval}s — the floor is HS_WATCH_MIN_INTERVAL"
+    interval="$HS_WATCH_MIN_INTERVAL"
+  fi
+  started=$(date +%s)
   while :; do
     state=$(hs_job_state "$job_id"); rc=$?
     case "$rc" in
@@ -198,6 +291,16 @@ hs_watch() {
         hs_note "job $job_id: no usable answer from $HS_HOST ($misses/$max_misses): ${state:-no output}"
         ;;
     esac
+    # Checked here rather than in the `while` condition so the cap can never cut short a
+    # poll that was about to report a genuine completion.
+    if [ "$cap" -gt 0 ]; then
+      elapsed=$(( $(date +%s) - started ))
+      if [ "$elapsed" -ge "$cap" ]; then
+        hs_note "job $job_id is still queued after ${elapsed}s of polling, which is the HS_WATCH_MAX_SECONDS cap — stopping."
+        hs_note "the job does not need you connected. Free the link with 'hpc-session close' and come back to 'hpc-session queue'."
+        return 3
+      fi
+    fi
     sleep "$interval"
   done
   hs_note "job $job_id left the queue"
@@ -212,6 +315,7 @@ hs_watch() {
 # %j in the template's --output/--error patterns produces.
 hs_fetch() {
   [ -n "${1:-}" ] || hs_die "usage: fetch <jobid> [destination_dir]"
+  hs_require_job_id "$1"
   local job_id="$1" dest="${2:-.}" files file
   mkdir -p "$dest" || hs_die "cannot write to $dest"
   # `find`, not `ls`: given a matching DIRECTORY, ls prints its contents as bare relative
@@ -232,5 +336,6 @@ hs_fetch() {
 
 hs_cancel() {
   [ -n "${1:-}" ] || hs_die "usage: cancel <jobid>"
+  hs_require_job_id "$1"
   hs_run_sh "scancel '$1'" && hs_note "cancelled $1"
 }

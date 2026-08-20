@@ -69,7 +69,9 @@ hpc-session cancel <jobid>
 
 - **Close the session during any real wait.** A full-tunnel VPN monopolises the user's
   link. Submit, close, and check back with `queue` later. Do not sit in `watch` for a job
-  measured in hours.
+  measured in hours — it stops by itself after `HS_WATCH_MAX_SECONDS` (an hour by default)
+  and exits 3, which means the job is **still running**, not finished. Polling faster than
+  `HS_WATCH_MIN_INTERVAL` (30 s) is raised to it, out loud; do not try to work around that.
 - **Never put a TOTP seed, password or scratch code in a message, a commit or a
   transcript.** If a seed must be stored, tell the user to run `hpc-session store-seed`
   themselves in a terminal. Reading `hpc-session code` output is fine; it expires.
@@ -80,10 +82,15 @@ hpc-session cancel <jobid>
   [docs/support-and-feedback.md](docs/support-and-feedback.md) rather than around it.
 - **Report what actually happened.** If a job fails, fetch the `.err` file and quote it
   rather than guessing from the exit status.
-- **A non-zero `watch` is not a finished job.** `watch` exits non-zero when it stops
-  getting usable answers about the job — a dropped master, a `squeue` that is not on the
-  non-interactive PATH, a controller restarting. Say the job's state is unknown and check
-  with `queue`; do not report it as complete. Only "job N left the queue" means that.
+- **A non-zero `watch` is not a finished job.** Read the status: `0` the job left the
+  queue (the only "finished"), `1` refused or lost track of it — a dropped master, a
+  `squeue` that is not on the non-interactive PATH, a controller restarting — and `3`
+  stopped at the polling cap with the job still queued. For `1` and `3`, say the job is
+  not known to have finished and check with `queue`. Only "job N left the queue" means it.
+- **Pass a job id, not a token you hope is one.** `watch`, `fetch` and `cancel` refuse
+  anything that is not a SLURM job id, and `submit` refuses to hand you one it cannot
+  verify. If `submit` fails, do **not** resubmit before checking `queue`: the job may
+  already be queued, and the error says so when that is possible.
 - **Do not edit the user's `~/.ssh/config`** to add multiplexing. The tool passes its own
   options; `hpc-session ssh-opts` prints them for any external tool that needs the same
   connection.
