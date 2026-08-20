@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Offline tests. No cluster, no VPN, no network — every function exercised here is pure.
+# Offline tests. No cluster, no VPN, no network: what cannot be run for real is stubbed —
+# ssh, scp, squeue, sacct, security — and the assertion is on what the tool ASKED them to
+# do. Runs on bash 3.2, the floor CI holds the tool to.
 #
 #   tests/run_tests.sh
 
@@ -7,7 +9,7 @@ set -uo pipefail
 
 HS_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 export HS_CONFIG_DIR="$HS_ROOT/tests/tmp-config"
-HS_PROFILE=test
+HS_PROFILE="test"
 
 . "$HS_ROOT/lib/config.sh"
 . "$HS_ROOT/lib/totp.sh"
@@ -36,6 +38,12 @@ check() {  # description, expected, actual
     printf 'FAIL  %s\n      expected: %s\n      actual:   %s\n' "$1" "$2" "$3"
   fi
 }
+
+# `check` compares strings, so a file-existence assertion has to become one. A helper
+# rather than an inline `$([ -f x ]; echo $?)`, because that idiom has a real trap in it:
+# one more command between the test and the `echo` and it silently reports the wrong
+# status. shellcheck flags it (SC2319) for exactly that reason.
+status_of() { if "$@"; then echo 0; else echo 1; fi; }
 
 check_contains() {  # description, needle, haystack
   case "$3" in
@@ -434,11 +442,11 @@ check_contains "and says which keys"           "HS_TOTP_SERVICE" "$poisoned"
 poisoned=$(poison_probe "svc" "me
 delete-keychain login.keychain"); rc=$?
 check "a newline in the account is refused"    1 "$rc"
-check "and nothing reached security"           0 "$([ ! -s "$keychain_log" ]; echo $?)"
+check "and nothing reached security"           0 "$(status_of test ! -s "$keychain_log")"
 # A single quote is legitimate: both values land inside "%s" fields, where security reads
 # it literally. Refusing it would be a documented rule the code does not need.
 poison_probe "o'brien" me >/dev/null 2>&1
-check "an apostrophe is accepted"              0 "$([ -s "$keychain_log" ]; echo $?)"
+check "an apostrophe is accepted"              0 "$(status_of test -s "$keychain_log")"
 rm -rf "$keychain_bin"
 
 # `doctor` is documented as the last step of setup, so it must not send a `command` backend
@@ -508,10 +516,10 @@ check_contains "push explains itself" "usage: push" "$bad"
 # README documents, or an exported HS_PROFILE. The positional `init <name>` did work.
 init_dir=$(mktemp -d "${TMPDIR:-/tmp}/hstest.XXXXXX")/cfg
 HS_CONFIG_DIR="$init_dir" "$HS_ROOT/bin/hpc-session" -p bigiron init >/dev/null 2>&1
-check "-p <name> init creates the profile" 0 "$([ -f "$init_dir/bigiron.conf" ]; echo $?)"
+check "-p <name> init creates the profile" 0 "$(status_of test -f "$init_dir/bigiron.conf")"
 rm -rf "$init_dir"
 HS_CONFIG_DIR="$init_dir" HS_PROFILE=bigiron "$HS_ROOT/bin/hpc-session" init >/dev/null 2>&1
-check "exported HS_PROFILE init creates it" 0 "$([ -f "$init_dir/bigiron.conf" ]; echo $?)"
+check "exported HS_PROFILE init creates it" 0 "$(status_of test -f "$init_dir/bigiron.conf")"
 rm -rf "$(dirname "$init_dir")"
 
 printf '\n%s passed, %s failed\n' "$PASSED" "$FAILED"

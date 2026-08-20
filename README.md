@@ -1,5 +1,7 @@
 # hpc-session
 
+[![tests](https://github.com/HolobiomicsLab/hpc-session/actions/workflows/tests.yml/badge.svg)](https://github.com/HolobiomicsLab/hpc-session/actions/workflows/tests.yml)
+
 One authenticated window to a SLURM cluster — for a person at a keyboard, and for a
 script or an agent that has no keyboard at all.
 
@@ -191,8 +193,12 @@ to report a vulnerability.
 tests/run_tests.sh
 ```
 
-Offline and fast: RFC 6238 vectors for the code generator, template rendering, job-id
-parsing, config precedence, and the CLI's argument handling. No cluster required.
+Offline and fast — no cluster, no network, no credential store. What cannot be run for
+real is stubbed (`ssh`, `scp`, `squeue`, `sacct`, `security`) and the assertion is on what
+the tool *asked* them to do.
+
+CI runs the same suite on Linux and on macOS, the latter under the `/bin/bash` Apple
+ships — version 3.2, which is the floor this tool is written to.
 
 ## Limitations
 
@@ -224,7 +230,7 @@ ln -s ~/git/hpc-session ~/.claude/skills/hpc-session
 Issues and pull requests are welcome, particularly worked profiles for other clusters
 (as `examples/<site>.conf`, with placeholders instead of real logins) and VPN hooks for
 clients not yet covered. Please keep `tests/run_tests.sh` green and add a case for any
-behaviour you change.
+behaviour you change — CI runs it on Linux and on macOS's bash 3.2, plus `shellcheck`.
 
 ## Authors
 
