@@ -3,7 +3,7 @@
 #SBATCH --account=${SLURM_ACCOUNT}
 #SBATCH --partition=${SLURM_PARTITION}
 #SBATCH --nodes=${SLURM_NODES}
-#SBATCH --ntasks=1
+#SBATCH --ntasks=${SLURM_NTASKS}
 #SBATCH --cpus-per-task=${SLURM_CPUS}
 #SBATCH --mem=${SLURM_MEM}
 #SBATCH --time=${SLURM_TIME}
@@ -21,6 +21,15 @@
 #
 # Keep %j in the --output/--error patterns: `hpc-session fetch <jobid>` finds the files
 # by job id.
+#
+# --ntasks was hard-coded to 1, so any HS_SLURM_NODES above 1 allocated nodes that then sat
+# idle. It is a placeholder now, but asking for more than one task is only half of it: the
+# payload below runs on the FIRST node only. A multi-node job has to launch its own work,
+#
+#   hpc-session render ... SLURM_NTASKS=4 PAYLOAD='srun ./run.sh'
+#
+# and anything more elaborate than that wants a job script of its own rather than this
+# template.
 
 set -uo pipefail
 

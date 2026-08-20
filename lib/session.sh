@@ -5,6 +5,47 @@
 # master authenticates once; every later ssh/scp/rsync multiplexes over it and does not
 # authenticate at all.
 
+# Temporary files this process creates, and a trap that removes them however it ends.
+#
+# hs_open_master_totp writes a LIVE TOTP code to a file for the askpass helper to read.
+# Falling through to `rm -f` covered the normal path only: a SIGINT between writing the
+# file and ssh consuming it — an impatient Ctrl-C, a CI timeout, an agent's supervisor —
+# left an unused, still-valid code on disk with nothing left to delete it. The window is
+# HS_CONNECT_TIMEOUT plus the retry sleeps. SECURITY.md says the code is read once and
+# then deleted; this is what makes that true.
+#
+# An array, not a string: a TMPDIR containing a space would otherwise word-split into
+# `rm -f` and take the wrong paths with it.
+HS_TEMP_FILES=()
+hs_temp_track() { HS_TEMP_FILES+=("$1"); }
+
+hs_temp_clean() {
+  [ ${#HS_TEMP_FILES[@]} -gt 0 ] && rm -f "${HS_TEMP_FILES[@]}"
+  HS_TEMP_FILES=()
+  return 0
+}
+
+# Remove one file and forget it, so a long-lived session does not accumulate a list of
+# paths it has already deleted.
+hs_temp_drop() {
+  rm -f "$1"
+  local kept=() f
+  for f in ${HS_TEMP_FILES[@]+"${HS_TEMP_FILES[@]}"}; do
+    [ "$f" = "$1" ] || kept+=("$f")
+  done
+  HS_TEMP_FILES=(${kept[@]+"${kept[@]}"})
+}
+
+# EXIT is what actually removes the files: bash runs it even when the shell is ending
+# because of a signal. The three signal traps are still worth writing — they make the exit
+# status the conventional 128+signal instead of the EXIT trap's own, and they state the
+# intent rather than resting on that behaviour of bash. What matters is that SOME trap
+# exists; before this, none did.
+trap 'hs_temp_clean' EXIT
+trap 'hs_temp_clean; exit 130' INT
+trap 'hs_temp_clean; exit 143' TERM
+trap 'hs_temp_clean; exit 129' HUP
+
 # ControlPath uses %C (a hash of the connection parameters) to stay well inside the
 # ~104-character limit on unix socket paths.
 hs_ssh_opts() {
@@ -66,10 +107,11 @@ HS_SSH_ERROR=""
 hs_ssh_capturing() {
   local err_file rc
   err_file=$(mktemp "${TMPDIR:-/tmp}/hserr.XXXXXX") || return 2
+  hs_temp_track "$err_file"
   "$@" 2>"$err_file"; rc=$?
   HS_SSH_ERROR=$(cat "$err_file")
   [ -s "$err_file" ] && cat "$err_file" >&2
-  rm -f "$err_file"
+  hs_temp_drop "$err_file"
   return "$rc"
 }
 
@@ -79,7 +121,14 @@ hs_error_is_fatal() {
   case "$HS_SSH_ERROR" in
     *"Could not resolve"*|*"Connection refused"*|*"No route to host"*|\
     *"Network is unreachable"*|*"Operation timed out"*|*"Connection timed out"*|\
-    *"Host key verification failed"*|*"Permission denied (publickey)"*) return 0 ;;
+    *"Host key verification failed"*|*"Too many authentication failures"*) return 0 ;;
+    # sshd names the methods that were left unsatisfied. A bare "(publickey)" only appears
+    # where keyboard-interactive is not in the list at all — so on the very sites this tool
+    # is built for, running AuthenticationMethods publickey,keyboard-interactive, a
+    # genuinely bad key produced "(publickey,keyboard-interactive)" and was retried three
+    # times over ~90s. Matching the open parenthesis catches both, and still leaves
+    # "(keyboard-interactive)" alone: that one IS the consumed-code case worth retrying.
+    *"Permission denied (publickey"*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -89,20 +138,27 @@ hs_open_master_plain() {
   hs_master_up
 }
 
+# Status 2 means the failure was LOCAL and ssh was never run. HS_SSH_ERROR is cleared with
+# it: leaving the previous attempt's text there had hs_error_is_fatal judging a stale
+# string, so the retry loop sat out three full time steps waiting for a code that was never
+# going to be generated.
 hs_open_master_totp() {
   local code code_file askpass_file
+  HS_SSH_ERROR=""
   code=$(hs_fresh_code) && [ -n "$code" ] || return 2
   # mktemp creates both files 0600; the askpass helper is then chmod 700. Perms never
   # widen, so no umask is set here — changing it would leak into the caller's process.
   code_file=$(mktemp "${TMPDIR:-/tmp}/hscode.XXXXXX") || return 2
-  askpass_file=$(mktemp "${TMPDIR:-/tmp}/hsask.XXXXXX") || { rm -f "$code_file"; return 2; }
+  hs_temp_track "$code_file"
+  askpass_file=$(mktemp "${TMPDIR:-/tmp}/hsask.XXXXXX") || { hs_temp_drop "$code_file"; return 2; }
+  hs_temp_track "$askpass_file"
   printf '%s\n' "$code" > "$code_file"
   unset code
   hs_write_askpass "$code_file" "$askpass_file"
   SSH_ASKPASS="$askpass_file" SSH_ASKPASS_REQUIRE=force \
     hs_ssh_capturing hs_ssh -f -N -M -o NumberOfPasswordPrompts=1 \
       -o ConnectTimeout="$HS_CONNECT_TIMEOUT" "$HS_HOST"
-  rm -f "$askpass_file" "$code_file"
+  hs_temp_drop "$askpass_file"; hs_temp_drop "$code_file"
   hs_master_up
 }
 
@@ -117,6 +173,10 @@ hs_try_open() {
 hs_vpn_connect() {
   hs_uses_vpn || return 0
   hs_vpn_up && return 0
+  # Status-only: the profile can tell whether the tunnel is up but not how to raise it,
+  # which is the documented shape for a VPN needing a human (a push, a smartcard). Saying
+  # so beats `eval ""` succeeding and letting the open fail later as a name-resolution error.
+  [ -n "$HS_VPN_UP_CMD" ] || hs_die "the VPN is not up and HS_VPN_UP_CMD is empty — bring it up yourself, then run this again"
   hs_note "bringing the VPN up..."
   eval "$HS_VPN_UP_CMD" >&2 || hs_die "VPN connect failed"
 }
@@ -125,7 +185,11 @@ hs_vpn_connect() {
 hs_open_with_retries() {
   local attempt left
   for attempt in $(seq 1 "$HS_AUTH_ATTEMPTS"); do
-    hs_try_open && { hs_note "master UP — ssh/scp/rsync/sbatch now run with no further codes"; return 0; }
+    hs_try_open; local rc=$?
+    [ "$rc" = 0 ] && { hs_note "master UP — ssh/scp/rsync/sbatch now run with no further codes"; return 0; }
+    # 2 is a local failure — no seed, no code, no temp file — and waiting out a time step
+    # changes none of those.
+    [ "$rc" = 2 ] && hs_die "could not produce a code to authenticate with: $(hs_seed_hint)"
     hs_error_is_fatal && hs_die "ssh could not connect (see the error above) — retrying would not help"
     [ -n "${HS_OTP:-}" ] && hs_die "the supplied HS_OTP was rejected (stale or already used)"
     [ "$attempt" = "$HS_AUTH_ATTEMPTS" ] && break
@@ -138,7 +202,10 @@ hs_open_with_retries() {
 
 hs_open_session() {
   hs_require_host
-  mkdir -p "$HS_CONTROL_DIR" && chmod 700 "$HS_CONTROL_DIR"
+  # Not swallowed: `set -uo pipefail` has no -e, so a failure here used to let the open
+  # proceed and simply never multiplex — which looks like a slow cluster, not a broken setup.
+  mkdir -p "$HS_CONTROL_DIR" && chmod 700 "$HS_CONTROL_DIR" \
+    || hs_die "cannot create the control directory $HS_CONTROL_DIR — without it nothing multiplexes"
   hs_clean_stale
   hs_master_up && { hs_note "master already up"; return 0; }
   # Verify a code can be PRODUCED before raising the tunnel — not that it will be

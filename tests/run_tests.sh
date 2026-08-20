@@ -710,6 +710,169 @@ case "$totp_code" in
   *) PASSED=$((PASSED + 1)) ;;
 esac
 
+# --- the 2026-07 audit's remaining findings --------------------------------------------
+
+# fetch ran its per-file copy on the right of a pipe, so the function's status was the LAST
+# copy's: every earlier scp failure was invisible in both the output and the exit code, and
+# a caller saw a clean 0 for a partial retrieval.
+fetch_root=$(mktemp -d "${TMPDIR:-/tmp}/hstest.XXXXXX")
+: > "$fetch_root/good-12345.out"
+: > "$fetch_root/bad-12345.err"
+HS_REMOTE_WORKDIR="$fetch_root"
+hs_run() { [ -t 0 ] && return 99; /bin/sh; }
+hs_ensure_open() { :; }
+hs_pull() { case "$1" in *bad-*) return 1 ;; *) return 0 ;; esac; }
+partial=$( hs_fetch 12345 "$fetch_root/dest" 2>/dev/null ); rc=$?
+check "a partial fetch is not a success"     1 "$rc"
+check_contains "and the copies that worked are still reported" "good-12345.out" "$partial"
+# ...while an entirely successful one still is.
+hs_pull() { :; }
+partial=$( hs_fetch 12345 "$fetch_root/dest" 2>/dev/null ); rc=$?
+check "a complete fetch succeeds"            0 "$rc"
+rm -rf "$fetch_root"
+restore_lib
+
+
+# A live TOTP code must not outlive the process that generated it. Falling through to
+# `rm -f` covered the normal path only: a SIGINT between writing the file and ssh reading
+# it left an unused, still-valid code on disk with nothing left to delete it.
+trap_dir=$(mktemp -d "${TMPDIR:-/tmp}/hstest.XXXXXX")
+cat > "$trap_dir/probe.sh" <<PROBE
+. "$HS_ROOT/lib/config.sh"
+. "$HS_ROOT/lib/totp.sh"
+. "$HS_ROOT/lib/session.sh"
+f=\$(mktemp "$trap_dir/code.XXXXXX")
+echo 424242 > "\$f"
+hs_temp_track "\$f"
+echo "\$f" > "$trap_dir/path"
+kill -INT \$\$
+sleep 30
+PROBE
+/bin/bash "$trap_dir/probe.sh" >/dev/null 2>&1
+trap_left=$(cat "$trap_dir/path" 2>/dev/null)
+check "a SIGINT takes the code file with it" 0 "$(status_of test ! -e "${trap_left:-/nonexistent}")"
+check "and there was a file to take"         0 "$(status_of test -n "$trap_left")"
+rm -rf "$trap_dir"
+
+# The askpass helper is single-shot on purpose: if it kept answering, a stale code would
+# make ssh re-invoke it in a loop and hang for minutes.
+ask_dir=$(mktemp -d "${TMPDIR:-/tmp}/hstest.XXXXXX")
+echo 424242 > "$ask_dir/code"
+hs_write_askpass "$ask_dir/code" "$ask_dir/ask"
+ask_first=$("$ask_dir/ask" 2>/dev/null)
+"$ask_dir/ask" >/dev/null 2>&1; ask_rc=$?
+check "the askpass helper answers once"      424242 "$ask_first"
+check "and fails on the second call"         1 "$ask_rc"
+check "and the code file is gone"            0 "$(status_of test ! -e "$ask_dir/code")"
+rm -rf "$ask_dir"
+
+# A bad key on a site running AuthenticationMethods publickey,keyboard-interactive — the
+# setup this tool exists for — does not produce a bare "(publickey)", so it was retried
+# three times over ~90s instead of failing at once.
+check "a key failure under 2FA is fatal"   fatal "$(fatal_verdict 'Permission denied (publickey,keyboard-interactive).')"
+check "too many failures is fatal"         fatal "$(fatal_verdict 'Received disconnect: Too many authentication failures')"
+# ...while the consumed-code case stays retryable, which is the whole point of the retry.
+check "a rejected code is still retried"   retry "$(fatal_verdict 'Permission denied (keyboard-interactive).')"
+
+# A LOCAL failure — no seed, no code — cannot be fixed by waiting a time step, but returning
+# 2 without running ssh left HS_SSH_ERROR holding the previous attempt's text, so the loop
+# judged a stale string and sat out three of them.
+try_log=$(mktemp "${TMPDIR:-/tmp}/hstest.XXXXXX")
+sleep() { :; }
+hs_step_left() { echo 1; }
+hs_try_open() { echo TRIED >> "$try_log"; return 2; }
+: > "$try_log"
+out=$( HS_AUTH_ATTEMPTS=3 hs_open_with_retries 2>&1 ); rc=$?
+check "a local failure is not retried"       1 "$rc"
+check "and ssh was attempted once only"      1 "$(grep -c TRIED "$try_log")"
+check_contains "and it names the setting"    "store-seed" "$out"
+
+hs_try_open() { echo TRIED >> "$try_log"; HS_SSH_ERROR="Permission denied (keyboard-interactive)."; return 1; }
+: > "$try_log"
+out=$( HS_AUTH_ATTEMPTS=3 hs_open_with_retries 2>&1 ); rc=$?
+check "a consumed code is retried in full"   3 "$(grep -c TRIED "$try_log")"
+rm -f "$try_log"
+unset -f sleep hs_step_left hs_try_open
+. "$HS_ROOT/lib/totp.sh"
+. "$HS_ROOT/lib/session.sh"
+
+# `set -uo pipefail` has no -e, so a control directory that cannot be created let the open
+# proceed and simply never multiplex — indistinguishable from a slow cluster.
+#
+# The two functions after the mkdir are stubbed so that a REGRESSION cannot reach the
+# network: without the guard, hs_open_session runs on to hs_clean_stale and the real ssh.
+hs_clean_stale() { :; }
+hs_open_with_retries() { echo "REACHED THE OPEN"; }
+out=$( HS_HOST=cluster HS_CONTROL_DIR=/dev/null/nope hs_open_session 2>&1 ); rc=$?
+check "an uncreatable control dir is fatal"  1 "$rc"
+check_contains "and says what it costs"      "multiplexes" "$out"
+case "$out" in
+  *"REACHED THE OPEN"*) FAILED=$((FAILED + 1)); echo "FAIL  open continued past an unusable control directory" ;;
+  *) PASSED=$((PASSED + 1)) ;;
+esac
+unset -f hs_clean_stale hs_open_with_retries
+. "$HS_ROOT/lib/session.sh"
+
+# docs/vpn-hooks.md recommends setting only HS_VPN_STATUS_CMD for a tunnel you keep up
+# yourself. Keying "is there a VPN" off HS_VPN_UP_CMD alone made that configuration report
+# "not configured" — the user's own status command was never run.
+vpn_verdict() { ( HS_VPN_UP_CMD="$1" HS_VPN_STATUS_CMD="$2"; hs_uses_vpn && echo yes || echo no ); }
+check "status-only counts as a VPN"          yes "$(vpn_verdict '' 'true')"
+check "both hooks count as a VPN"            yes "$(vpn_verdict 'up' 'true')"
+check "neither hook is no VPN"               no  "$(vpn_verdict '' '')"
+# ...and with no way to raise it, a down tunnel is refused rather than `eval ""`-ed.
+out=$( HS_VPN_UP_CMD='' HS_VPN_STATUS_CMD='false' hs_vpn_connect 2>&1 ); rc=$?
+check "a down status-only tunnel is refused" 1 "$rc"
+check_contains "and says to raise it"        "bring it up yourself" "$out"
+unset -f vpn_verdict
+
+# umask governs creation only, so a seed written into an HS_TOTP_FILE that already existed
+# at 0644 kept that mode — a permanent second factor, readable by anyone on the machine.
+file_mode() { ls -l "$1" | cut -c2-10; }
+seed_file="$HS_CONFIG_DIR/loose.seed"
+: > "$seed_file"; chmod 644 "$seed_file"
+( HS_TOTP_BACKEND=file HS_TOTP_FILE="$seed_file" hs_seed_store_backend GEZDGNBVGY3TQOJQ )
+check "an existing seed file is tightened"   "rw-------" "$(file_mode "$seed_file")"
+rm -f "$seed_file"
+unset -f file_mode
+
+# `getattr(hashlib, algo)` and `int(...)` were unguarded, and hs_store_seed discarded the
+# stderr that said so — every failure was reported as an invalid seed, sending the user to
+# re-enrol over a mistyped parameter.
+out=$(printf 'GEZDGNBVGY3TQOJQ' | HS_TOTP_ALGO=md5 hs_seed_to_code 2>&1); rc=$?
+check "a bad algorithm fails"                1 "$rc"
+check_contains "and names the algorithm"     "sha1, sha256 or sha512" "$out"
+out=$(printf 'GEZDGNBVGY3TQOJQ' | HS_TOTP_PERIOD=30s hs_seed_to_code 2>&1); rc=$?
+check_contains "a bad period says so"        "whole numbers" "$out"
+out=$(printf 'GEZDGNBVGY3TQOJQ\n' | HS_TOTP_BACKEND=file HS_TOTP_FILE="$HS_CONFIG_DIR/x.seed" \
+      HS_TOTP_ALGO=md5 hs_store_seed 2>&1); rc=$?
+check "store-seed fails on a bad algorithm"  1 "$rc"
+check_contains "and does not blame the seed" "sha1, sha256 or sha512" "$out"
+rm -f "$HS_CONFIG_DIR/x.seed"
+
+# hs_usage sliced lines 2-25 out of its own source while the header ended at 19, so
+# `--help` printed executable code as if it were documentation.
+help_out=$(/bin/bash "$HS_ROOT/bin/hpc-session" --help 2>&1)
+check_contains "help shows the usage"        "hpc-session open" "$help_out"
+case "$help_out" in
+  *"set -uo pipefail"*|*"hs_script_dir"*) FAILED=$((FAILED + 1)); echo "FAIL  --help printed executable code" ;;
+  *) PASSED=$((PASSED + 1)) ;;
+esac
+
+# Every key hs_apply_defaults knows about should be findable in config.example — that file
+# is what `init` copies, and README calls it the reference for every setting.
+undocumented=""
+for key in $(sed -n 's/^  : "${\(HS_[A-Z_]*\):=.*/\1/p' "$HS_ROOT/lib/config.sh"); do
+  grep -q "$key" "$HS_ROOT/config.example" || undocumented="$undocumented $key"
+done
+check "every default is in config.example"   "" "$undocumented"
+
+# The no-argument subcommands ignored trailing arguments, so `open -p bigiron` opened the
+# DEFAULT cluster while appearing to select a profile — and spent a TOTP code doing it.
+out=$(/bin/bash "$HS_ROOT/bin/hpc-session" status -p bigiron 2>&1); rc=$?
+check "a no-argument subcommand refuses extras" 1 "$rc"
+check_contains "and says where -p goes"      "goes first" "$out"
+
 # --- CLI surface ---------------------------------------------------------------------
 help_text=$("$HS_ROOT/bin/hpc-session" --help)
 check_contains "help mentions open"   "hpc-session open"   "$help_text"

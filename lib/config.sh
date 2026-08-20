@@ -69,6 +69,7 @@ hs_apply_defaults() {
   : "${HS_SLURM_CPUS:=1}"
   : "${HS_SLURM_MEM:=4G}"
   : "${HS_SLURM_NODES:=1}"
+  : "${HS_SLURM_NTASKS:=1}"
   : "${HS_PYTHON:=python3}"
 }
 
@@ -98,7 +99,11 @@ hs_require_host() {
   [ -n "$HS_HOST" ] || hs_die "HS_HOST is unset — run 'hpc-session init $HS_PROFILE' and set it"
 }
 
-hs_uses_vpn() { [ -n "$HS_VPN_UP_CMD" ]; }
+# Is a VPN part of this profile at all? Keyed off either hook, not only the one that
+# raises it: docs/vpn-hooks.md explicitly recommends setting HS_VPN_STATUS_CMD alone for a
+# tunnel you keep up yourself, and that configuration made every VPN report read
+# "not configured" — the user's own status command was never run.
+hs_uses_vpn() { [ -n "$HS_VPN_UP_CMD" ] || [ -n "$HS_VPN_STATUS_CMD" ]; }
 
 # Copy the annotated example into the profile path, never clobbering an existing one.
 hs_init_profile() {

@@ -21,6 +21,7 @@ HS_SLURM_TIME="01:00:00"
 HS_SLURM_CPUS="1"
 HS_SLURM_MEM="4G"
 HS_SLURM_NODES="1"
+HS_SLURM_NTASKS="1"
 
 # --- polling (watch) ----------------------------------------------------------------
 # A shared controller answers squeue for everyone, so the interval has a floor and the
@@ -66,3 +67,14 @@ HS_CONTROL_PERSIST="8h"     # how long an idle master survives
 HS_CONNECT_TIMEOUT="25"     # seconds
 HS_AUTH_ATTEMPTS="3"        # retries when a TOTP code was already consumed
 HS_PYTHON="python3"         # only used to generate TOTP codes
+HS_CONTROL_DIR=""           # where master sockets live; empty = ~/.ssh/hpc-session
+
+# --- read from the environment, not from here ---------------------------------------
+# These two are consumed before this file is sourced, or instead of it, so an assignment
+# here does nothing. Pass them on the command line:
+#
+#   HS_CONFIG_DIR   where profiles live (default ~/.config/hpc-session)
+#                     HS_CONFIG_DIR=/media/key/hpc hpc-session status
+#   HS_OTP          one code for one command, instead of any stored seed. The point of the
+#                   `none` backend plus a code you type: nothing is stored at all.
+#                     HS_OTP=123456 hpc-session open

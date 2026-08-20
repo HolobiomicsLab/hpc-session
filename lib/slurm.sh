@@ -75,7 +75,8 @@ hs_render() {
   for pair in \
     "SLURM_ACCOUNT=$HS_SLURM_ACCOUNT" "SLURM_PARTITION=$HS_SLURM_PARTITION" \
     "SLURM_TIME=$HS_SLURM_TIME" "SLURM_CPUS=$HS_SLURM_CPUS" "SLURM_MEM=$HS_SLURM_MEM" \
-    "SLURM_NODES=$HS_SLURM_NODES" "REMOTE_WORKDIR=$HS_REMOTE_WORKDIR" "$@"; do
+    "SLURM_NODES=$HS_SLURM_NODES" "SLURM_NTASKS=$HS_SLURM_NTASKS" \
+    "REMOTE_WORKDIR=$HS_REMOTE_WORKDIR" "$@"; do
     key=${pair%%=*}
     value=$(hs_escape_replacement "${pair#*=}")
     expressions+=(-e "s|\${$key}|$value|g")
@@ -328,10 +329,22 @@ hs_fetch() {
   # `! -type d` rather than `-type f` so a symlinked output, which ls did return, still comes.
   files=$(hs_run_sh "find -H \"$HS_REMOTE_WORKDIR\" -maxdepth 1 ! -type d -name '*$job_id*' 2>/dev/null")
   [ -n "$files" ] || { hs_note "nothing matching '$job_id' in $HS_REMOTE_WORKDIR"; return 1; }
-  printf '%s\n' "$files" | while IFS= read -r file; do
+  # A here-doc, not a pipe: on the right of a pipe the loop runs in a subshell, so `failed`
+  # would be discarded and the function's status would be the LAST copy's — every earlier
+  # scp failure invisible in both the output and the exit code.
+  local failed=0
+  while IFS= read -r file; do
     [ -n "$file" ] || continue
-    hs_pull "$file" "$dest/" >/dev/null && echo "$dest/$(basename "$file")"
-  done
+    if hs_pull "$file" "$dest/" >/dev/null; then
+      echo "$dest/$(basename "$file")"
+    else
+      failed=$((failed + 1))
+      hs_note "could not fetch $file"
+    fi
+  done <<HS_FILES
+$files
+HS_FILES
+  [ "$failed" = 0 ] || hs_die "$failed of the job's files could not be fetched"
 }
 
 hs_cancel() {

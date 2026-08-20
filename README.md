@@ -110,7 +110,9 @@ and `cancel` refuse anything that is not one. `submit` applies the same check to
 queued — resubmitting on a non-zero exit is how you end up running it twice.
 
 Template placeholders come from your profile, and any extra `KEY=VALUE` argument becomes
-another substitution. A placeholder left empty removes its whole `#SBATCH` line, so an
+another substitution. The shipped template is a single-node job by default; `SLURM_NTASKS`
+is a placeholder, and a job that asks for more than one node has to launch its own work
+(`PAYLOAD='srun ./run.sh'`), because the script body runs on the first node only. A placeholder left empty removes its whole `#SBATCH` line, so an
 unset account does not become an `--account=` that SLURM rejects. Keep `%j` in the
 `--output`/`--error` patterns — that is how `fetch` finds the files.
 
@@ -180,7 +182,9 @@ which `submit` forwards unchanged: `hpc-session submit job.slurm --partition=gpu
 
 Any VPN works, because the hooks are just shell commands — `HS_VPN_UP_CMD`,
 `HS_VPN_DOWN_CMD`, and `HS_VPN_STATUS_CMD` (which must exit 0 when the tunnel is up).
-Leave them empty if your cluster is reachable directly. Worked examples for Cisco Secure
+Leave them empty if your cluster is reachable directly. Setting `HS_VPN_STATUS_CMD` alone
+is a supported shape, for a tunnel you raise yourself: the tool then reports the tunnel's
+state and refuses to open while it is down, rather than trying to raise it. Worked examples for Cisco Secure
 Client, WireGuard, OpenVPN and Tailscale are in [docs/vpn-hooks.md](docs/vpn-hooks.md).
 
 ## Two-factor authentication
@@ -233,7 +237,8 @@ ships — version 3.2, which is the floor this tool is written to.
   longer.
 - `fetch` matches regular files directly in `HS_REMOTE_WORKDIR` whose name contains the
   job id. A job that writes into a per-job *directory*, or names its outputs otherwise,
-  needs `pull`.
+  needs `pull`. It prints the files it retrieved and exits non-zero if any copy failed —
+  a partial retrieval is not a success.
 - `sacct` is absent on some sites; `watch` then prints nothing after the job ends, and
   loses the fallback it would otherwise use to confirm a completion `squeue` stopped
   answering for. On such a site a `watch` that loses its answers fails rather than
