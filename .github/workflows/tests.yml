@@ -1,0 +1,46 @@
+# The suite is offline and takes seconds, so every push and every pull request runs it.
+#
+# Two bash versions on purpose. macOS still ships bash 3.2 — no associative arrays, no
+# ${var^^} — and that is the floor this tool is written to, because the people it is for
+# are on the Macs their institution gave them. A CI that only ran bash 5 would let a
+# 4.x-ism land and break the platform the README claims first.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    name: ${{ matrix.os }} (${{ matrix.bash }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            bash: bash 5.x
+          - os: macos-latest
+            bash: bash 3.2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Report the interpreter under test
+        run: /bin/bash --version | head -1
+      - name: Run the suite
+        run: /bin/bash tests/run_tests.sh
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # --severity=warning: the info level is dominated by SC2015 (`A && B || C`), which
+      # this codebase uses deliberately and everywhere for two-branch reporting. Silencing
+      # it per-site would add more noise than it removes; raising the floor keeps the job
+      # meaningful rather than permanently red or permanently ignored.
+      - name: Lint
+        run: shellcheck --severity=warning --shell=bash bin/hpc-session lib/*.sh tests/run_tests.sh
