@@ -57,6 +57,12 @@ hs_apply_defaults() {
   : "${HS_TOTP_PERIOD:=30}"
   : "${HS_TOTP_ALGO:=sha1}"
   : "${HS_REMOTE_WORKDIR:=.}"
+  # Polling limits. The floor and the cap are the enforcement of what
+  # docs/cluster-etiquette.md and SKILL.md already state as rules; see hs_watch.
+  : "${HS_WATCH_INTERVAL:=30}"
+  : "${HS_WATCH_MIN_INTERVAL:=30}"
+  : "${HS_WATCH_MAX_SECONDS:=3600}"
+  : "${HS_WATCH_MAX_MISSES:=3}"
   : "${HS_SLURM_ACCOUNT:=}"
   : "${HS_SLURM_PARTITION:=}"
   : "${HS_SLURM_TIME:=01:00:00}"

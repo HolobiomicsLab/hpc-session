@@ -91,8 +91,14 @@ hpc-session cancel 12345
 ```
 
 `submit` copies a local script to `HS_REMOTE_WORKDIR` and submits it there; a path that
-is not a local file is taken to be already on the cluster. Extra arguments go to `sbatch`
-unchanged: `hpc-session submit job.slurm --dependency=afterok:12344`.
+is not a local file is taken to be already on the cluster, and used literally. Extra
+arguments go to `sbatch` unchanged — properly quoted, so a space or a `$` in one reaches
+`sbatch` as you wrote it: `hpc-session submit job.slurm --dependency=afterok:12344`.
+
+A job id is checked before it becomes part of a remote command line, so `watch`, `fetch`
+and `cancel` refuse anything that is not one. `submit` applies the same check to what
+`sbatch` printed, and if the reply is unreadable it says the job may nonetheless be
+queued — resubmitting on a non-zero exit is how you end up running it twice.
 
 Template placeholders come from your profile, and any extra `KEY=VALUE` argument becomes
 another substitution. A placeholder left empty removes its whole `#SBATCH` line, so an
@@ -106,9 +112,20 @@ non-zero saying so, rather than printing the same "left the queue" line a real c
 would print. A dropped connection, a `squeue` behind a module and a mistyped job id all
 used to be indistinguishable from a finished job.
 
+Its exit status is the contract, which matters most when the caller is a script:
+
+| | |
+|---|---|
+| `0` | the job left the queue — the only status that means finished |
+| `1` | refused, or lost track of the job: its state is **unknown**, not final |
+| `3` | stopped at `HS_WATCH_MAX_SECONDS`; the job is still queued and still running |
+
 **On a full-tunnel VPN, do not leave `watch` running for a long job.** Close the session
 and come back to `hpc-session queue` later; the job does not care whether you are
-connected.
+connected. That is a limit the tool now keeps rather than merely recommends: polling has a
+floor (`HS_WATCH_MIN_INTERVAL`, 30 s) and the whole watch has a cap
+(`HS_WATCH_MAX_SECONDS`, an hour). Ask for something tighter and `watch` says what it
+clamped instead of silently obeying or silently ignoring you.
 
 ## Working with a cluster
 
@@ -215,6 +232,11 @@ ships — version 3.2, which is the floor this tool is written to.
 - The tool's own remote commands run under `sh` on the cluster, whatever login shell the
   account uses. `hpc-session run` is left alone: that is your command line, and it belongs
   to your login shell.
+- Multi-cluster (federated) submission is out of scope. `submit` reads the job id out of
+  either form of `sbatch`'s reply, but nothing here passes `-M`, so `watch`, `fetch` and
+  `cancel` query `HS_HOST` only. When `sbatch` reports another cluster, `submit` says so.
+- `HS_REMOTE_WORKDIR` is expanded by the cluster, which is what makes a `$USER` in it work.
+  A remote script path given to `submit` is not: it is passed literally.
 
 ## Use as a Claude Code skill
 

@@ -80,11 +80,15 @@ Set `HS_REMOTE_WORKDIR` to a scratch path, not to your home directory.
 for every user on the machine. Poll on the order of a minute, not a second.
 
 ```bash
-hpc-session watch <jobid> 60      # the interval is yours to choose; default 30 s
+hpc-session watch <jobid> 60      # slower than the default 30 s, which is also the floor
 ```
 
+This is enforced rather than merely asked for. A shorter interval is raised to
+`HS_WATCH_MIN_INTERVAL` and `watch` says so; `watch <jobid> 0` no longer busy-waits.
+
 For anything longer than a coffee, do not poll at all: submit, close the session, and
-check back later.
+check back later. `watch` stops by itself after `HS_WATCH_MAX_SECONDS` (an hour by
+default) and tells you how to come back — it exits 3, which is not a completion.
 
 ```bash
 hpc-session submit job.slurm

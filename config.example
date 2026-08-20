@@ -22,6 +22,14 @@ HS_SLURM_CPUS="1"
 HS_SLURM_MEM="4G"
 HS_SLURM_NODES="1"
 
+# --- polling (watch) ----------------------------------------------------------------
+# A shared controller answers squeue for everyone, so the interval has a floor and the
+# whole watch has a cap. Both are enforced, and `watch` says when it clamps one.
+HS_WATCH_INTERVAL="30"       # default seconds between polls; `watch <id> <n>` overrides
+HS_WATCH_MIN_INTERVAL="30"   # a shorter interval is raised to this, out loud
+HS_WATCH_MAX_SECONDS="3600"  # stop polling after this long and say how to come back; 0 = no cap
+HS_WATCH_MAX_MISSES="3"      # unusable answers in a row before watch stops trusting them
+
 # --- VPN (optional) ----------------------------------------------------------------
 # Leave HS_VPN_UP_CMD empty if the cluster is reachable directly. Any VPN works: these
 # are just shell commands. HS_VPN_STATUS_CMD must exit 0 when the tunnel is up.
