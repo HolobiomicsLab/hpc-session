@@ -16,9 +16,19 @@ try:
     key = base64.b32decode(seed, casefold=True)
 except Exception:
     sys.exit("seed is not valid base32")
-digits = int(os.environ.get("HS_TOTP_DIGITS") or 6)
-period = int(os.environ.get("HS_TOTP_PERIOD") or 30)
+# Checked rather than left to raise: an uncaught ValueError or AttributeError here is
+# reported by hs_store_seed as "not a valid base32 TOTP seed", sending the user to inspect
+# the one thing that was fine.
+try:
+    digits = int(os.environ.get("HS_TOTP_DIGITS") or 6)
+    period = int(os.environ.get("HS_TOTP_PERIOD") or 30)
+except ValueError:
+    sys.exit("HS_TOTP_DIGITS and HS_TOTP_PERIOD must be whole numbers")
+if digits < 1 or period < 1:
+    sys.exit("HS_TOTP_DIGITS and HS_TOTP_PERIOD must be positive")
 algo = (os.environ.get("HS_TOTP_ALGO") or "sha1").lower()
+if algo not in ("sha1", "sha256", "sha512"):
+    sys.exit("HS_TOTP_ALGO must be sha1, sha256 or sha512 (got %r)" % algo)
 now = int(os.environ.get("HS_TOTP_NOW") or time.time())
 mac = hmac.new(key, struct.pack(">Q", now // period), getattr(hashlib, algo)).digest()
 offset = mac[-1] & 0x0F
@@ -113,7 +123,9 @@ hs_seed_store_backend() {
       printf 'add-generic-password -U -s "%s" -a "%s" -l "%s TOTP seed" -T /usr/bin/security -w "%s"\n' \
         "$HS_TOTP_SERVICE" "$HS_TOTP_ACCOUNT" "$HS_TOTP_SERVICE" "$seed" | security -i ;;
     pass)     printf '%s\n' "$seed" | pass insert -m -f "$HS_TOTP_PASS_ENTRY" >/dev/null ;;
-    file)     (umask 077; printf '%s\n' "$seed" > "$HS_TOTP_FILE") ;;
+    # umask governs CREATION only. An HS_TOTP_FILE that already existed at 0644 kept its
+    # mode, and the seed was written into it — a permanent second factor, world-readable.
+    file)     (umask 077; printf '%s\n' "$seed" > "$HS_TOTP_FILE") && chmod 600 "$HS_TOTP_FILE" ;;
     *)        hs_die "backend '$HS_TOTP_BACKEND' stores no seed (use keychain, pass or file)" ;;
   esac
 }
@@ -128,7 +140,12 @@ hs_store_seed() {
   fi
   seed=$(printf '%s' "$seed" | tr -d '[:space:]')
   [ -n "$seed" ] || hs_die "empty seed"
-  printf '%s' "$seed" | hs_seed_to_code >/dev/null 2>&1 || hs_die "not a valid base32 TOTP seed"
+  # Keep the generator's own complaint. Discarding it reported every failure as a bad seed,
+  # including "HS_TOTP_ALGO must be sha1, sha256 or sha512" — which is not about the seed
+  # at all, and sends the user to re-enrol for nothing.
+  local why
+  why=$(printf '%s' "$seed" | hs_seed_to_code 2>&1 >/dev/null) \
+    || hs_die "${why:-not a valid base32 TOTP seed}"
   hs_seed_store_backend "$seed" || hs_die "storing the seed failed"
   unset seed
   hs_note "seed stored via backend '$HS_TOTP_BACKEND'"

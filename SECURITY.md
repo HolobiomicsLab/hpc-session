@@ -50,6 +50,12 @@ These are properties of the design, not bugs. They are documented so you can dec
 - **The control socket is a live, authenticated connection.** Anyone who can write to
   your `HS_CONTROL_DIR` as your user can use it without authenticating. The directory is
   created 0700; on a shared machine, keep it on local disk, and `close` when you are done.
+- **A code can outlive a crash, but not a signal.** The generated code is written to a
+  mode-0600 temporary file for the askpass helper to read. A trap removes it on `EXIT`,
+  `INT`, `TERM` and `HUP`, so a Ctrl-C or a supervisor's `kill` between writing the file
+  and `ssh` consuming it does not leave a live second factor on disk. A `SIGKILL` or a
+  power loss still can; the code expires within one time step either way.
+
 - **The keychain item is readable by `security` without a prompt.** `store-seed` creates
   it with `-T /usr/bin/security`, so any process running as you can read the seed back
   without the keychain asking — which is what makes unattended `open` work at all. Use

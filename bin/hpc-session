@@ -37,7 +37,21 @@ HS_ROOT=$(dirname "$(hs_script_dir)")
 . "$HS_ROOT/lib/session.sh"
 . "$HS_ROOT/lib/slurm.sh"
 
-hs_usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-1}"; }
+# Print the header comment, stopping at the first line that is not one. The line range it
+# used to slice was 2,25 while the header ended at 19, so `--help` printed `set -uo
+# pipefail` and the first lines of a function as if they were documentation.
+hs_usage() {
+  awk 'NR > 1 { if (!/^#/) exit; sub(/^# ?/, ""); print }' "$0"
+  exit "${1:-1}"
+}
+
+# The no-argument subcommands ignored anything after them, so `hpc-session open -p bigiron`
+# opened the DEFAULT cluster while appearing to select a profile — and burned a TOTP code
+# doing it. `-p` is only recognised before the subcommand, which is where the message points.
+hs_no_args() {  # subcommand name, then whatever was left over
+  local name="$1"; shift
+  [ $# -eq 0 ] || hs_die "$name takes no arguments (got: $*) — the profile selector goes first: hpc-session -p <profile> $name"
+}
 
 hs_report() {  # label, ok/fail, detail
   [ "$2" = ok ] && printf '  ok    %-12s %s\n' "$1" "$3" || printf '  FAIL  %-12s %s\n' "$1" "$3"
@@ -56,8 +70,13 @@ hs_doctor_totp() {
 
 hs_doctor_vpn() {
   hs_uses_vpn || { hs_report vpn ok "not configured"; return; }
-  [ -n "$HS_VPN_STATUS_CMD" ] && hs_report vpn ok "hooks set" \
-                              || hs_report vpn fail "HS_VPN_UP_CMD set but HS_VPN_STATUS_CMD is not"
+  if [ -z "$HS_VPN_STATUS_CMD" ]; then
+    hs_report vpn fail "HS_VPN_UP_CMD set but HS_VPN_STATUS_CMD is not"
+  elif [ -z "$HS_VPN_UP_CMD" ]; then
+    hs_report vpn ok "status only — you raise the tunnel yourself"
+  else
+    hs_report vpn ok "hooks set"
+  fi
 }
 
 # Everything checkable without touching the network — safe to run before a first login.
@@ -105,19 +124,19 @@ fi
 hs_load_profile
 
 case "${1:-}" in
-  open)       shift; hs_open_session ;;
-  close)      shift; hs_close_session ;;
-  status)     shift; hs_status ;;
-  doctor)     shift; hs_doctor ;;
-  code)       shift; hs_code || hs_die "no code available (backend '$HS_TOTP_BACKEND')" ;;
-  store-seed) shift; hs_store_seed ;;
-  ssh-opts)   shift; hs_ssh_opts; echo ;;
+  open)       shift; hs_no_args open "$@";       hs_open_session ;;
+  close)      shift; hs_no_args close "$@";      hs_close_session ;;
+  status)     shift; hs_no_args status "$@";     hs_status ;;
+  doctor)     shift; hs_no_args doctor "$@";     hs_doctor ;;
+  code)       shift; hs_no_args code "$@";       hs_code || hs_die "no code available (backend '$HS_TOTP_BACKEND')" ;;
+  store-seed) shift; hs_no_args store-seed "$@"; hs_store_seed ;;
+  ssh-opts)   shift; hs_no_args ssh-opts "$@";   hs_ssh_opts; echo ;;
   run)        shift; [ "${1:-}" = "--" ] && shift; [ $# -gt 0 ] || hs_die "run needs a command"; hs_run "$@" ;;
   local)      shift; [ "${1:-}" = "--" ] && shift; [ $# -gt 0 ] || hs_die "local needs a command"; hs_local "$@" ;;
   push)       shift; [ $# -eq 2 ] || hs_die "usage: push <local> <remote>"; hs_push "$1" "$2" ;;
   pull)       shift; [ $# -eq 2 ] || hs_die "usage: pull <remote> <local>"; hs_pull "$1" "$2" ;;
   submit)     shift; hs_submit "$@" ;;
-  queue)      shift; hs_queue ;;
+  queue)      shift; hs_no_args queue "$@";      hs_queue ;;
   watch)      shift; hs_watch "$@" ;;
   fetch)      shift; hs_fetch "$@" ;;
   cancel)     shift; hs_cancel "$@" ;;
