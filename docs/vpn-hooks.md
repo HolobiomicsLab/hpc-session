@@ -12,9 +12,16 @@ profile:
 Leave `HS_VPN_UP_CMD` empty if your cluster is reachable directly — everything else then
 behaves as if no VPN existed.
 
-The tool checks it can authenticate *before* raising the tunnel, because a full-tunnel
-VPN monopolises the link: failing after connecting would strand your other remote access
-for no reason.
+Before raising the tunnel, the tool checks that it can *produce* a TOTP code — that a
+seed is readable, or that `HS_TOTP_CMD` is set. It does not attempt an authentication:
+under a full tunnel the login node is usually not reachable until the tunnel is up, so
+there is nothing to authenticate against yet.
+
+The check is worth having anyway, because a missing seed is the common failure and it
+costs nothing to catch it early: a full-tunnel VPN monopolises the link, so failing
+*after* connecting would strand your other remote access for no reason. It is not a
+guarantee that the login will succeed. A wrong seed, an unenrolled account or a bad key
+still fails after the tunnel is up.
 
 ## Etiquette on a full tunnel
 

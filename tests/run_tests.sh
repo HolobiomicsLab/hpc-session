@@ -352,6 +352,52 @@ case "$fetch_cmd" in
   *) PASSED=$((PASSED + 1)) ;;
 esac
 
+# --- claims the documentation makes ---------------------------------------------------
+
+# `local` helps exactly the tools that read these two variables. The docs listed sshfs
+# among them; sshfs reads neither, takes its transport from `-o ssh_command=`, and would
+# therefore have opened a SECOND unmultiplexed connection — under TOTP, a second code,
+# which is the one thing this tool exists to prevent.
+hs_ensure_open() { :; }
+local_env=$(hs_local /bin/sh -c 'printf "%s|%s" "${RSYNC_RSH:-none}" "${GIT_SSH_COMMAND:-none}"')
+restore_lib
+check_contains "local exports RSYNC_RSH"       "ControlMaster=auto" "${local_env%%|*}"
+check_contains "local exports GIT_SSH_COMMAND" "ControlMaster=auto" "${local_env##*|}"
+
+# The check before the tunnel. docs/vpn-hooks.md used to say the tool verifies it can
+# authenticate, which it cannot — under a full tunnel the login node is unreachable until
+# the tunnel is up. What it does verify is that a code can be PRODUCED, and that has to
+# happen before HS_VPN_UP_CMD runs, because a full tunnel monopolises the link.
+vpn_log=$(mktemp "${TMPDIR:-/tmp}/hstest.XXXXXX")
+vpn_ctl=$(mktemp -d "${TMPDIR:-/tmp}/hstest.XXXXXX")
+hs_master_up()        { return 1; }
+hs_clean_stale()      { :; }
+hs_have_seed()        { return 1; }
+hs_open_with_retries()  { echo "AUTHENTICATED"; }
+: > "$vpn_log"
+out=$( HS_HOST=cluster HS_CONTROL_DIR="$vpn_ctl" HS_TOTP_BACKEND=keychain \
+       HS_VPN_UP_CMD="echo ran > $vpn_log" HS_VPN_STATUS_CMD=false \
+       hs_open_session 2>&1 ); rc=$?
+check "open refuses without a code"          1 "$rc"
+check "and the VPN was never raised"         0 "$(status_of test ! -s "$vpn_log")"
+check_contains "and says what is missing"    "store-seed" "$out"
+
+# ...and with a code available it gets past the check, raising the tunnel first.
+hs_have_seed() { return 0; }
+: > "$vpn_log"
+out=$( HS_HOST=cluster HS_CONTROL_DIR="$vpn_ctl" HS_TOTP_BACKEND=keychain \
+       HS_VPN_UP_CMD="echo ran > $vpn_log" HS_VPN_STATUS_CMD=false \
+       hs_open_session 2>&1 ); rc=$?
+check "open proceeds when a code exists"     0 "$rc"
+check "and the VPN went up first"            0 "$(status_of test -s "$vpn_log")"
+rm -rf "$vpn_log" "$vpn_ctl"
+restore_lib
+# hs_have_seed lives in totp.sh, the other three in session.sh. Both have to come back:
+# HS_REAL_DEFS holds only the transport functions, so restore_lib alone would leave this
+# block's stubs standing for the rest of the suite — the exact leak #14 raised against #1.
+. "$HS_ROOT/lib/totp.sh"
+. "$HS_ROOT/lib/session.sh"
+
 # --- regressions from the 2026-07 audit ----------------------------------------------
 
 # The `command` backend has no stored seed by design. hs_seed_read has no `command` arm,
