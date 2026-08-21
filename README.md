@@ -298,7 +298,8 @@ Université Côte d'Azur.
 ## Changelog
 
 [CHANGELOG.md](CHANGELOG.md). Behaviour changes worth knowing before upgrading are listed
-first in each release.
+first in each release. `hpc-session version` says which copy you have, and `doctor` opens
+with the same line — quote it when reporting anything.
 
 ## License
 

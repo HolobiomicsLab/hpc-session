@@ -907,6 +907,27 @@ help_text=$("$HS_ROOT/bin/hpc-session" --help)
 check_contains "help mentions open"   "hpc-session open"   "$help_text"
 check_contains "help mentions submit" "hpc-session submit" "$help_text"
 
+# A release whose tool cannot say which release it is leaves a caller — an agent most of
+# all — no way to know which side of a behaviour change it is on. The version has to
+# survive a profile that does not load, and it has to match the newest CHANGELOG heading,
+# or the tag, the notes and the tool drift apart silently.
+ver_out=$("$HS_ROOT/bin/hpc-session" version 2>&1); rc=$?
+check "version exits 0"                      0 "$rc"
+check_contains "version names the tool"      "hpc-session" "$ver_out"
+ver_num=${ver_out##* }
+changelog_num=$(sed -n 's/^## \([0-9][0-9.]*\) .*/\1/p' "$HS_ROOT/CHANGELOG.md" | head -1)
+check "version matches the changelog"        "$changelog_num" "$ver_num"
+
+# It must answer with a profile that does not exist, which is when someone is diagnosing.
+ver_broken=$(HS_CONFIG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hstest.XXXXXX")" \
+  "$HS_ROOT/bin/hpc-session" -p nosuchprofile version 2>&1); rc=$?
+check "version survives a missing profile"   0 "$rc"
+check "and still reports the version"        "hpc-session $changelog_num" "$ver_broken"
+
+doc_ver=$(HS_CONFIG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hstest.XXXXXX")" \
+  "$HS_ROOT/bin/hpc-session" doctor 2>&1)
+check_contains "doctor reports the version"  "hpc-session $changelog_num" "$doc_ver"
+
 bad=$("$HS_ROOT/bin/hpc-session" push only-one-arg 2>&1); rc=$?
 check "push with one argument fails" 1 "$rc"
 check_contains "push explains itself" "usage: push" "$bad"

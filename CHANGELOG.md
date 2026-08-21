@@ -2,13 +2,13 @@
 
 ## 0.1.0 — 2026-08-21
 
-First tagged release. The repository has been public since 2026-07-29 and there was no
-tag before this one, so anyone who cloned in between holds a copy with the defects listed
-under **Fixed** — several of which are silent. Upgrading is worth it.
+First tagged release. The repository has been public since late July 2026 and there was
+no tag before this one, so anyone who cloned in between holds a copy with the defects
+listed under **Fixed** — several of which are silent. Upgrading is worth it.
 
 Two audits, in July and August, produced the work below. Every fix carries a test, and
 each test was checked against the specific defect it guards rather than only against the
-previous state of `main`. The suite went from 37 assertions to 188.
+previous state of `main`. The suite went from 37 assertions to 194.
 
 ### Changed — read before upgrading
 
@@ -47,6 +47,9 @@ previous state of `main`. The suite went from 37 assertions to 188.
   `HS_WATCH_MAX_MISSES`, `HS_TEMPLATE_DIR`.
 - `SLURM_NTASKS` as a template placeholder. It was hard-coded to 1 while `--nodes` was a
   placeholder, so any `HS_SLURM_NODES` above 1 allocated nodes that then sat idle.
+- **`hpc-session version`**, also reported by `doctor`. It answers before the profile
+  loads, so a broken setup can still say which copy it is; a test holds it equal to the
+  newest heading in this file.
 - A second worked example profile, for the ordinary key-only cluster.
 
 ### Fixed
