@@ -66,11 +66,38 @@ hs_parse_workdir() { sed -n 's/^hs_workdir=//p' | tail -1; }
 # the CLUSTER expanded — see hs_submit.
 hs_remote_path() { echo "$1/$(basename "$2")"; }
 
+# Resolve a template argument, which is either a PATH or a bare NAME.
+#
+# The name form is the whole point: a skill that owns a job TYPE — SIRIUS, an aligner, a
+# simulation — should not also have to own a path. It sets HS_TEMPLATE_DIR to its own
+# assets, or drops <name>.slurm.tmpl in the shipped one, and then `render <name>` finds it
+# from anywhere. A path keeps working unchanged, which is what every existing caller passes.
+hs_template_path() {
+  case "$1" in
+    */*|*.tmpl) printf '%s\n' "$1" ;;
+    *)          printf '%s\n' "$HS_TEMPLATE_DIR/$1.slurm.tmpl" ;;
+  esac
+}
+
+# The job types this installation can render. Names, not paths, because a name is what
+# `render` takes and what another skill's documentation should quote.
+hs_templates() {
+  local file name found=0
+  for file in "$HS_TEMPLATE_DIR"/*.slurm.tmpl; do
+    [ -f "$file" ] || continue
+    found=1
+    name=${file##*/}
+    printf '%s\n' "${name%.slurm.tmpl}"
+  done
+  [ "$found" = 1 ] || hs_note "no job templates in $HS_TEMPLATE_DIR (set HS_TEMPLATE_DIR, or pass a path to render)"
+  return 0
+}
+
 # Substitute the documented ${PLACEHOLDER}s in a job template. Extra KEY=VALUE pairs
 # become extra substitutions, so a template can carry job-specific fields too.
 hs_render() {
-  local template="$1"; shift
-  [ -f "$template" ] || hs_die "no such template: $template"
+  local template; template=$(hs_template_path "$1"); shift
+  [ -f "$template" ] || hs_die "no such template: $template (try: hpc-session templates)"
   local expressions=() pair key value
   for pair in \
     "SLURM_ACCOUNT=$HS_SLURM_ACCOUNT" "SLURM_PARTITION=$HS_SLURM_PARTITION" \
