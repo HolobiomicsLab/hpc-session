@@ -20,9 +20,12 @@ of `hpc-session`; see [README.md](README.md) for the full reference and
 ## Before anything else
 
 ```bash
+hpc-session version         # which release this is — behaviour differs between them
 hpc-session doctor          # no network — reports what is configured and what is missing
 hpc-session status          # is the master up? the VPN? is a TOTP seed present?
 ```
+
+`version` answers even when the profile is missing or broken, so it is safe to ask first.
 
 If no profile exists, run `hpc-session init` — or `hpc-session -p <name> init` for a second
 cluster — and tell the user which keys they must fill in (`HS_HOST` at minimum). Do not

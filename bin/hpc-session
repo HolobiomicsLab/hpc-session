@@ -15,6 +15,7 @@
 #   hpc-session watch 12345                # poll until it leaves the queue
 #   hpc-session fetch 12345 ./results      # bring the job's files back
 #   hpc-session close                      # drop master + VPN, freeing the link
+#   hpc-session version                    # which release this copy is
 #
 # Setup:  hpc-session init [profile]  ->  edit the profile  ->  hpc-session doctor
 # Docs:   README.md, docs/2fa-enrollment.md, docs/vpn-hooks.md
@@ -82,6 +83,7 @@ hs_doctor_vpn() {
 
 # Everything checkable without touching the network — safe to run before a first login.
 hs_doctor() {
+  echo "hpc-session $HS_VERSION"
   echo "profile $HS_PROFILE ($(hs_profile_path "$HS_PROFILE"))"
   [ -n "$HS_HOST" ] && hs_report host ok "$HS_HOST" || hs_report host fail "HS_HOST is unset"
   hs_doctor_tool ssh "the whole tool depends on it"
@@ -121,6 +123,15 @@ if [ "${1:-}" = init ]; then
   hs_init_profile
   exit
 fi
+
+# Dispatched before the loader, like `init`: a missing or broken profile is exactly when
+# someone needs to say which copy of the tool they are running, and the answer does not
+# depend on a profile. CHANGELOG.md is the other half of this string; a test holds them
+# together so a tag cannot drift from what the tool reports.
+HS_VERSION="0.1.0"
+case "${1:-}" in
+  version|--version) printf 'hpc-session %s\n' "$HS_VERSION"; exit 0 ;;
+esac
 
 hs_load_profile
 
