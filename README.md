@@ -91,7 +91,8 @@ sshfs -o ssh_command="ssh $(hpc-session ssh-opts)" mycluster:/scratch/$USER ~/mn
 ### SLURM
 
 ```bash
-hpc-session render templates/job.slurm.tmpl JOB_NAME=align PAYLOAD='./run.sh in.fa' > job.slurm
+hpc-session templates                     # job types this installation can render
+hpc-session render job JOB_NAME=align PAYLOAD='./run.sh in.fa' > job.slurm
 hpc-session submit job.slurm              # copies it up, sbatch, prints the job id
 hpc-session queue                         # your jobs
 hpc-session watch 12345                   # poll until it leaves the queue
@@ -109,8 +110,11 @@ and `cancel` refuse anything that is not one. `submit` applies the same check to
 `sbatch` printed, and if the reply is unreadable it says the job may nonetheless be
 queued — resubmitting on a non-zero exit is how you end up running it twice.
 
-Template placeholders come from your profile, and any extra `KEY=VALUE` argument becomes
-another substitution. The shipped template is a single-node job by default; `SLURM_NTASKS`
+`render` takes either a path or a bare **name**, which it resolves to
+`$HS_TEMPLATE_DIR/<name>.slurm.tmpl` (`templates/` by default). The name form is what lets
+something else own a job type without owning a path — see *Use as a Claude Code skill*
+below. Template placeholders come from your profile, and any extra `KEY=VALUE` argument
+becomes another substitution. The shipped template is a single-node job by default; `SLURM_NTASKS`
 is a placeholder, and a job that asks for more than one node has to launch its own work
 (`PAYLOAD='srun ./run.sh'`), because the script body runs on the first node only. A placeholder left empty removes its whole `#SBATCH` line, so an
 unset account does not become an `--account=` that SLURM rejects. Keep `%j` in the
@@ -260,6 +264,23 @@ picks the right subcommand and respects the etiquette rules:
 ```bash
 ln -s ~/git/hpc-session ~/.claude/skills/hpc-session
 ```
+
+It is deliberately a **transport** skill: it owns the connection and the job lifecycle, and
+knows nothing about what a job computes. A skill that owns a job *type* — an annotation
+tool, an aligner, a simulation — sits on top and keeps the science, delegating the
+connection here. Neither has to know about the other in advance; both are selected from
+their own description, in the ordinary way.
+
+What the one on top needs is a job shape, and it should not have to hardcode a path to get
+one. Ship `<jobtype>.slurm.tmpl` in your own assets and point `HS_TEMPLATE_DIR` at them:
+
+```bash
+HS_TEMPLATE_DIR=~/git/my-skill/assets hpc-session render myjob JOB_NAME=x PAYLOAD='./run.sh'
+```
+
+`SKILL.md` states the rest of the contract — open once, capture the job id from `submit`'s
+stdout, read `watch`'s exit status, and keep site facts in that cluster's notes rather than
+in either skill.
 
 ## Contributing
 

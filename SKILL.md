@@ -57,7 +57,8 @@ cluster. Use `local` for anything that reads local paths.
 ## Jobs
 
 ```bash
-hpc-session render templates/job.slurm.tmpl JOB_NAME=x PAYLOAD='./run.sh' > job.slurm
+hpc-session templates               # job types this installation can render
+hpc-session render job JOB_NAME=x PAYLOAD='./run.sh' > job.slurm   # or a path to a template
 hpc-session submit job.slurm        # prints the job id on stdout
 hpc-session queue
 hpc-session watch <jobid>           # polls; holds the link
@@ -112,6 +113,41 @@ For anything beyond driving the connection, read the matching page rather than i
   environments off `$HOME`, containers, compute nodes without internet.
 - [docs/support-and-feedback.md](docs/support-and-feedback.md) — what a good problem
   report contains, and how to ask for a limit to be changed rather than working around it.
+
+## Composing with a skill that owns a job type
+
+This skill owns the **connection and the job lifecycle** — opening one authenticated
+window, submitting, watching, fetching, and the etiquette around all of it. It does not
+know what any particular job computes.
+
+A skill that owns a job *type* — SIRIUS annotation, an aligner, a simulation — sits on top
+of it and keeps the science: which module to load, what the job script says, how to read
+the output. Nothing needs to be registered: both skills are selected the ordinary way,
+from their `description`, so write that description to name the job type and the words a
+user would actually say. Two skills covering the same tool in different places should each
+say which is which — "for the local run use X instead" — because that sentence is what the
+model routes on.
+
+The contract for the skill on top:
+
+```bash
+hpc-session templates                 # what this installation can render
+HS_TEMPLATE_DIR=<your skill>/assets \
+  hpc-session render <jobtype> JOB_NAME=... PAYLOAD='...' > job.slurm
+```
+
+Ship `<jobtype>.slurm.tmpl` in your own `assets/` and point `HS_TEMPLATE_DIR` at it, or
+drop it in this repository's `templates/`. Either way `render <name>` finds it and a path
+never has to appear in your instructions. Then:
+
+- **open once, close once.** Everything in between is free; a connect-per-step loop costs
+  a code each time.
+- **capture the job id from `submit`'s stdout** — `job=$(hpc-session submit job.slurm)` —
+  and pass that value on. Do not re-derive it from a log.
+- **read `watch`'s exit status** (0 finished, 1 unknown, 3 still queued). Only 0 licenses
+  "the job is done".
+- **keep site facts out of both skills.** Partition names, module versions and scratch
+  paths belong in that cluster's `templates/site-notes.md`, which the project keeps.
 
 ## Site-specific knowledge
 

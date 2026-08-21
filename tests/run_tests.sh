@@ -146,6 +146,35 @@ check "filled sbatch line kept" "#SBATCH --account=abc" \
   "$(printf '#SBATCH --account=abc\n' | hs_strip_empty_sbatch)"
 
 # --- rendering -----------------------------------------------------------------------
+
+# A template argument is a PATH or a bare NAME. The name form is what lets a skill that
+# owns a job TYPE avoid owning a path: it points HS_TEMPLATE_DIR at its own assets.
+tmpl_dir=$(mktemp -d "${TMPDIR:-/tmp}/hstest.XXXXXX")
+printf '#SBATCH --job-name=${JOB_NAME}\nOWN TEMPLATE\n' > "$tmpl_dir/sirius.slurm.tmpl"
+printf 'ignored\n' > "$tmpl_dir/notes.md"
+check "a bare name resolves in the template dir" "$tmpl_dir/sirius.slurm.tmpl" \
+  "$( HS_TEMPLATE_DIR="$tmpl_dir" hs_template_path sirius )"
+check "a path is used as given"       "templates/job.slurm.tmpl" \
+  "$( HS_TEMPLATE_DIR="$tmpl_dir" hs_template_path templates/job.slurm.tmpl )"
+check "a bare .tmpl file is a path"   "job.slurm.tmpl" \
+  "$( HS_TEMPLATE_DIR="$tmpl_dir" hs_template_path job.slurm.tmpl )"
+check_contains "render finds a template by name" "OWN TEMPLATE" \
+  "$( HS_TEMPLATE_DIR="$tmpl_dir" hs_render sirius JOB_NAME=x 2>/dev/null )"
+# `templates` lists NAMES, since a name is what render takes, and only job templates.
+check "templates lists what render can take" "sirius" \
+  "$( HS_TEMPLATE_DIR="$tmpl_dir" hs_templates 2>/dev/null )"
+out=$( HS_TEMPLATE_DIR="$tmpl_dir/empty" hs_templates 2>&1 ); rc=$?
+check "an empty template dir is not an error" 0 "$rc"
+check_contains "but says so"                  "no job templates" "$out"
+out=$( HS_TEMPLATE_DIR="$tmpl_dir" hs_render nosuch 2>&1 ); rc=$?
+check "an unknown name fails"                 1 "$rc"
+check_contains "and points at the list"       "hpc-session templates" "$out"
+rm -rf "$tmpl_dir"
+
+# The shipped template is reachable by its own name, which is what the docs quote.
+check "the shipped template is named job" "job" \
+  "$(hs_templates 2>/dev/null | grep -x job)"
+
 HS_SLURM_ACCOUNT=myacct
 HS_SLURM_PARTITION=""
 HS_SLURM_TIME=02:00:00

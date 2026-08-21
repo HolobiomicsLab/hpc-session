@@ -57,6 +57,9 @@ hs_apply_defaults() {
   : "${HS_TOTP_PERIOD:=30}"
   : "${HS_TOTP_ALGO:=sha1}"
   : "${HS_REMOTE_WORKDIR:=.}"
+  # Where `render <name>` looks. Point it at another skill's assets and that skill owns its
+  # own job shapes without owning any paths — see "Composing with other skills" in SKILL.md.
+  : "${HS_TEMPLATE_DIR:=${HS_ROOT:-.}/templates}"
   # Polling limits. The floor and the cap are the enforcement of what
   # docs/cluster-etiquette.md and SKILL.md already state as rules; see hs_watch.
   : "${HS_WATCH_INTERVAL:=30}"

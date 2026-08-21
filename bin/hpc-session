@@ -11,6 +11,7 @@
 #   hpc-session local rsync -a ./data host:/scratch/   # runs LOCALLY over the same master
 #   hpc-session push job.slurm /scratch/   # copy up
 #   hpc-session submit job.slurm           # copy up + sbatch, prints the job id
+#   hpc-session templates                  # the job types this installation can render
 #   hpc-session watch 12345                # poll until it leaves the queue
 #   hpc-session fetch 12345 ./results      # bring the job's files back
 #   hpc-session close                      # drop master + VPN, freeing the link
@@ -140,6 +141,7 @@ case "${1:-}" in
   watch)      shift; hs_watch "$@" ;;
   fetch)      shift; hs_fetch "$@" ;;
   cancel)     shift; hs_cancel "$@" ;;
-  render)     shift; [ $# -ge 1 ] || hs_die "usage: render <template> [KEY=VALUE...]"; hs_render "$@" ;;
+  render)     shift; [ $# -ge 1 ] || hs_die "usage: render <template|name> [KEY=VALUE...]"; hs_render "$@" ;;
+  templates)  shift; hs_no_args templates "$@";  hs_templates ;;
   *)          hs_usage ;;
 esac

@@ -23,6 +23,11 @@ HS_SLURM_MEM="4G"
 HS_SLURM_NODES="1"
 HS_SLURM_NTASKS="1"
 
+# Where `hpc-session render <name>` looks for <name>.slurm.tmpl. Empty = the templates/
+# directory shipped with the tool. Point it at another skill's assets and that skill owns
+# its own job shapes without hardcoding a path.
+HS_TEMPLATE_DIR=""
+
 # --- polling (watch) ----------------------------------------------------------------
 # A shared controller answers squeue for everyone, so the interval has a floor and the
 # whole watch has a cap. Both are enforced, and `watch` says when it clamps one.
