@@ -285,14 +285,20 @@ in either skill.
 ## Contributing
 
 Issues and pull requests are welcome, particularly worked profiles for other clusters
-(as `examples/<site>.conf`, with placeholders instead of real logins) and VPN hooks for
-clients not yet covered. Please keep `tests/run_tests.sh` green and add a case for any
+(as `examples/<site>.conf`, with placeholders instead of real logins — see
+[`examples/`](examples/) for the two shapes already there) and VPN hooks for clients not
+yet covered. Please keep `tests/run_tests.sh` green and add a case for any
 behaviour you change — CI runs it on Linux and on macOS's bash 3.2, plus `shellcheck`.
 
 ## Authors
 
 Developed at the [HolobiomicsLab](https://github.com/HolobiomicsLab) — CNRS and
 Université Côte d'Azur.
+
+## Changelog
+
+[CHANGELOG.md](CHANGELOG.md). Behaviour changes worth knowing before upgrading are listed
+first in each release.
 
 ## License
 
