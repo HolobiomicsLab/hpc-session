@@ -110,5 +110,7 @@ previous state of `main`. The suite went from 37 assertions to 194.
   terminal is unaffected.
 - Multi-cluster (federated) submission is out of scope. `submit` says so when `sbatch`
   reports another cluster.
-- Everything above is verified offline, against stubs. No part of this release has been
-  exercised against a live SLURM controller.
+- The test suite is entirely offline, against stubs. Separately, one end-to-end run was
+  made against a live SLURM controller (a TOTP-gated cluster behind a VPN): `open`,
+  `render`, `submit`, `queue`, `watch` to completion, `fetch`, `cancel`, `close`, all as
+  documented. That is one site and one SLURM version, not a compatibility claim.
