@@ -28,6 +28,10 @@ TOTP seed if you configure a backend that stores one.
   code (in which case nothing is stored here).
 - **The seed never appears in `argv` or the environment.** It is piped into the code
   generator on stdin, so `ps` cannot see it.
+- **A failed seed read is logged; the seed never is.** The backend's error message, its
+  exit status and the time go to `HS_TOTP_ERROR_LOG`, created mode 0600 beside your
+  profiles. A successful read hands the seed on with a shell builtin, so it still reaches
+  no `argv`, no environment and no file.
 - **The generated code** is written to a `mktemp` file (mode 0600) and read exactly once:
   the askpass helper prints it and deletes it. That single-shot behaviour is deliberate —
   a helper that kept answering would let `ssh` retry a stale code in a loop.

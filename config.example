@@ -67,6 +67,12 @@ HS_TOTP_DIGITS="6"
 HS_TOTP_PERIOD="30"
 HS_TOTP_ALGO="sha1"
 
+# A seed read that fails is tried once more after this many seconds, and the backend's
+# own message — never the seed — is appended to the log. Empty means the default,
+# $HS_CONFIG_DIR/<profile>.totp-errors.log. open, doctor and status repeat the latest one.
+HS_TOTP_READ_RETRY_DELAY="2"
+HS_TOTP_ERROR_LOG=""
+
 # --- connection tuning --------------------------------------------------------------
 HS_CONTROL_PERSIST="8h"     # how long an idle master survives
 HS_CONNECT_TIMEOUT="25"     # seconds

@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A seed read that fails now says why.** The backend's message used to go to
+  `/dev/null`, so `open`, `doctor` and `status` said "no seed — run store-seed" even when
+  the seed was stored and the keychain had only refused one request. They now repeat the
+  backend's own reason. Every failed read is appended to `HS_TOTP_ERROR_LOG` (default
+  `$HS_CONFIG_DIR/<profile>.totp-errors.log`) with its exit status and, for the keychain,
+  the macOS session it ran in. Only the error is written; the seed never is.
+- **A failed read is tried once more** after `HS_TOTP_READ_RETRY_DELAY` seconds (default
+  2), which absorbs a refusal that clears by itself. Not after a cancelled prompt, which
+  would ask again someone who just said no, and not for a missing seed file.
+
 ## 0.1.0 — 2026-08-21
 
 First tagged release. The repository has been public since late July 2026 and there was

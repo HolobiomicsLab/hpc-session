@@ -56,6 +56,10 @@ hs_apply_defaults() {
   : "${HS_TOTP_DIGITS:=6}"
   : "${HS_TOTP_PERIOD:=30}"
   : "${HS_TOTP_ALGO:=sha1}"
+  # A failed seed read is tried once more after this many seconds, and the backend's own
+  # message — never the seed — goes to this log. See hs_seed_read.
+  : "${HS_TOTP_READ_RETRY_DELAY:=2}"
+  : "${HS_TOTP_ERROR_LOG:=$HS_CONFIG_DIR/$HS_PROFILE.totp-errors.log}"
   : "${HS_REMOTE_WORKDIR:=.}"
   # Where `render <name>` looks. Point it at another skill's assets and that skill owns its
   # own job shapes without owning any paths — see "Composing with other skills" in SKILL.md.

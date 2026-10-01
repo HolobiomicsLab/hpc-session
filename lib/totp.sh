@@ -39,14 +39,82 @@ print(str(truncated % (10 ** digits)).zfill(digits))
 # Seconds remaining in the current TOTP step.
 hs_step_left() { echo $(( HS_TOTP_PERIOD - ($(date +%s) % HS_TOTP_PERIOD) )); }
 
-# Print the stored base32 seed. Fails if the backend holds none.
-hs_seed_read() {
+# One read from the backend, with nothing hidden: the seed on stdout, the backend's own
+# complaint, if any, on stderr.
+hs_seed_fetch() {
   case "$HS_TOTP_BACKEND" in
-    keychain) security find-generic-password -s "$HS_TOTP_SERVICE" -a "$HS_TOTP_ACCOUNT" -w 2>/dev/null ;;
-    pass)     pass show "$HS_TOTP_PASS_ENTRY" 2>/dev/null | head -1 ;;
-    file)     [ -f "$HS_TOTP_FILE" ] && head -1 "$HS_TOTP_FILE" ;;
-    *)        return 1 ;;
+    keychain) security find-generic-password -s "$HS_TOTP_SERVICE" -a "$HS_TOTP_ACCOUNT" -w ;;
+    pass)     pass show "$HS_TOTP_PASS_ENTRY" | head -1 ;;
+    file)     [ -f "$HS_TOTP_FILE" ] || { echo "no file at $HS_TOTP_FILE" >&2; return 1; }
+              head -1 "$HS_TOTP_FILE" ;;
+    *)        echo "backend '$HS_TOTP_BACKEND' stores no seed" >&2; return 1 ;;
   esac
+}
+
+# Print the stored base32 seed. Fails if the backend holds none, or will not hand it over.
+#
+# A failed read used to vanish: the backend's stderr went to /dev/null, and every caller then
+# said "no seed — run store-seed", even when the seed was stored and the keychain had merely
+# refused this one request. That pointed the user at re-enrolling a second factor that was
+# fine, and left a refusal that came and went with nothing to diagnose it from. Now the
+# backend's message is appended to HS_TOTP_ERROR_LOG, and the read is tried once more after
+# HS_TOTP_READ_RETRY_DELAY seconds, which absorbs a refusal that clears by itself.
+#
+# Only stderr is ever written down. stdout IS the seed: it is held in a local variable and
+# handed on with `printf`, a builtin, so it still reaches no argv, no environment and no file.
+#
+# No second attempt after a cancelled prompt, which would ask a user who just said no again,
+# nor for a file that does not exist, which a few seconds will not create.
+hs_seed_read() {
+  local attempt seed rc err_file delay="${HS_TOTP_READ_RETRY_DELAY:-2}"
+  case "$delay" in ''|*[!0-9]*) delay=2 ;; esac
+  for attempt in 1 2; do
+    err_file=$(mktemp "${TMPDIR:-/tmp}/hsseed.XXXXXX") || return 1
+    seed=$(hs_seed_fetch 2>"$err_file"); rc=$?
+    if [ "$rc" -eq 0 ] && [ -n "$seed" ]; then
+      rm -f "$err_file" "$(hs_seed_error_log).last"
+      printf '%s\n' "$seed"
+      return 0
+    fi
+    seed=""
+    hs_seed_error_record "$attempt" "$rc" "$err_file"
+    rm -f "$err_file"
+    [ "$attempt" = 1 ] || return 1
+    case "$HS_TOTP_BACKEND:$HS_SEED_LAST_ERROR" in
+      file:*|*[Cc]ancel*) return 1 ;;
+    esac
+    sleep "$delay"
+  done
+  return 1
+}
+
+hs_seed_error_log() {
+  echo "${HS_TOTP_ERROR_LOG:-${HS_CONFIG_DIR:-$HOME/.config/hpc-session}/${HS_PROFILE:-default}.totp-errors.log}"
+}
+
+# Append one line per failed read: when, which backend, which attempt, its exit status, the
+# macOS session the read ran in, and what the backend said. The latest message is also kept
+# beside the log, so the hint printed by open, doctor and status can repeat it; a read that
+# succeeds removes it.
+#
+# The session matters for the keychain. `security` started outside the logged-in GUI
+# session cannot show a prompt, so a keychain that would ask the user refuses instead — one
+# way a read can work from a terminal and fail from an agent at the same moment.
+hs_seed_error_record() {  # attempt, exit status, file holding the backend's stderr
+  local why log session=""
+  why=$(tr '\n' ' ' < "$3" | sed 's/  */ /g; s/ $//' | cut -c1-300)
+  [ -n "$why" ] || why="the backend printed nothing and gave no reason"
+  HS_SEED_LAST_ERROR="$why"
+  if [ "$HS_TOTP_BACKEND" = keychain ] && command -v launchctl >/dev/null 2>&1; then
+    session=" session=$(launchctl managername 2>/dev/null || echo unknown)"
+  fi
+  log=$(hs_seed_error_log)
+  ( umask 077
+    mkdir -p "$(dirname "$log")" \
+      && printf '%s %s attempt=%s exit=%s%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+           "$HS_TOTP_BACKEND" "$1" "$2" "$session" "$why" >> "$log" \
+      && printf '%s\n' "$why" > "$log.last" ) 2>/dev/null
+  return 0
 }
 
 # Can this profile produce a code at all? Asked before the VPN goes up, so a failure is
@@ -68,9 +136,17 @@ hs_have_seed() {
 # step of setup: telling a `command` user to run `store-seed` — for a backend that stores
 # nothing, and whose store-seed exits 1 saying exactly that — left them with no way forward
 # until they reached `open`, which is the one place the right message used to live.
+#
+# When the last read left a reason behind, that reason leads. "No seed" is only one of the
+# ways a read fails; the keychain refusing this one request is another, and re-enrolling
+# does nothing for it.
 hs_seed_hint() {
+  local last log
+  log=$(hs_seed_error_log)
   if [ "$HS_TOTP_BACKEND" = command ]; then
     echo "HS_TOTP_CMD is empty — set it to a command that prints one code"
+  elif last=$(cat "$log.last" 2>/dev/null) && [ -n "$last" ]; then
+    echo "the seed in '$HS_TOTP_BACKEND' could not be read: $last (history in $log; if no seed was ever stored, run: hpc-session store-seed)"
   else
     echo "no seed in '$HS_TOTP_BACKEND' and no HS_OTP — run: hpc-session store-seed"
   fi

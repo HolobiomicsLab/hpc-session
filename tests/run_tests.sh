@@ -686,6 +686,61 @@ poison_probe "o'brien" me >/dev/null 2>&1
 check "an apostrophe is accepted"              0 "$(status_of test -s "$keychain_log")"
 rm -rf "$keychain_bin"
 
+# A failed seed read must say why, and get a second chance. It used to be silent: stderr
+# went to /dev/null, and open, doctor and status all said "no seed — run store-seed" while
+# the seed sat in the keychain, refused for one request only. `security` is SHADOWED here
+# for the same reason as above: nothing in this block may reach a real keychain.
+read_bin=$(mktemp -d "${TMPDIR:-/tmp}/hstest.XXXXXX")
+read_log="$read_bin/errors.log"
+cat > "$read_bin/security" <<STUB
+#!/bin/sh
+n=\$(cat "$read_bin/count" 2>/dev/null || echo 0); n=\$((n + 1)); echo "\$n" > "$read_bin/count"
+case "\$FAKE_SECURITY" in
+  flaky)  [ "\$n" -ge 2 ] && { echo GEZDGNBVGY3TQOJQ; exit 0; } ;;
+  cancel) echo "security: SecKeychainSearchCopyNext: User canceled the operation." >&2; exit 128 ;;
+esac
+echo "security: SecKeychainSearchCopyNext: User interaction is not allowed." >&2
+exit 36
+STUB
+chmod +x "$read_bin/security"
+seed_probe() {  # stub mode; prints whatever the read handed over
+  rm -f "$read_bin/count" "$read_log" "$read_log.last"
+  ( PATH="$read_bin:$PATH"; export FAKE_SECURITY="$1"
+    HS_TOTP_BACKEND=keychain HS_TOTP_SERVICE=svc HS_TOTP_ACCOUNT=me \
+      HS_TOTP_ERROR_LOG="$read_log" HS_TOTP_READ_RETRY_DELAY=0 hs_seed_read ) 2>/dev/null
+}
+seed=$(seed_probe flaky); rc=$?
+check "a refusal that clears is absorbed"       "0|GEZDGNBVGY3TQOJQ" "$rc|$seed"
+check "and is recorded once"                    1 "$(grep -c . "$read_log")"
+check_contains "with the keychain's own reason" "User interaction is not allowed" "$(cat "$read_log")"
+check_contains "and its exit status"            "exit=36" "$(cat "$read_log")"
+check "the seed itself is never written down"   1 "$(status_of grep -q GEZDGNBVGY3TQOJQ "$read_log")"
+check "a good read clears the latest reason"    1 "$(status_of test -e "$read_log.last")"
+seed=$(seed_probe refuse); rc=$?
+check "a refusal that persists still fails"     "1|" "$rc|$seed"
+check "after exactly two attempts"              2 "$(grep -c . "$read_log")"
+hint=$(HS_TOTP_BACKEND=keychain HS_TOTP_ERROR_LOG="$read_log" hs_seed_hint)
+check_contains "the hint repeats the reason"    "User interaction is not allowed" "$hint"
+seed_probe cancel >/dev/null
+check "a cancelled prompt is not shown twice"   1 "$(grep -c . "$read_log")"
+rm -f "$read_log" "$read_log.last"
+( HS_TOTP_BACKEND=file HS_TOTP_FILE=/nonexistent/seed HS_TOTP_ERROR_LOG="$read_log" \
+    HS_TOTP_READ_RETRY_DELAY=0 hs_seed_read ) >/dev/null 2>&1
+check "a missing seed file is not read twice"   1 "$(grep -c . "$read_log")"
+# Through the subcommand, as for the hint below: the fix is about what doctor says.
+kc_dir=$(mktemp -d "${TMPDIR:-/tmp}/hstest.XXXXXX")
+cat > "$kc_dir/kc.conf" <<'PROFILE'
+HS_HOST="cluster.invalid"
+HS_TOTP_BACKEND="keychain"
+HS_TOTP_READ_RETRY_DELAY="0"
+PROFILE
+rm -f "$read_bin/count"
+kc_out=$(PATH="$read_bin:$PATH" FAKE_SECURITY=refuse HS_CONFIG_DIR="$kc_dir" \
+  "$HS_ROOT/bin/hpc-session" -p kc doctor 2>&1)
+check_contains "doctor says why the keychain refused" "User interaction is not allowed" "$kc_out"
+check "and keeps the history beside the profile" 0 "$(status_of test -s "$kc_dir/kc.totp-errors.log")"
+rm -rf "$kc_dir" "$read_bin"
+
 # `doctor` is documented as the last step of setup, so it must not send a `command` backend
 # user to store-seed — a subcommand that exits 1 saying it stores nothing.
 #

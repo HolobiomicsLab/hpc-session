@@ -106,6 +106,7 @@ stall for up to 30 seconds waiting for a fresh step.
 |---|---|---|
 | `auth failed … waiting Ns for a fresh code` | the previous code was already consumed | it retries by itself; wait one step |
 | `could not open the master`, repeatedly | VPN down, or wrong seed | `hpc-session status`; compare `hpc-session code` with the phone |
+| `the seed in 'keychain' could not be read: …` | the keychain refused this read, often because it wanted to show a prompt and the command ran outside your logged-in session | the message names the reason; `HS_TOTP_ERROR_LOG` keeps every failed read with the session it ran in. Run `doctor` from your own terminal to compare |
 | Commands hang instead of failing | stale socket after the tunnel dropped | `hpc-session close` then `open` (it also cleans up on its own) |
 | Every code rejected | clock skew — TOTP is time-based | check the machine's clock is NTP-synced |
 | Codes rejected only sometimes | your site may not use the default profile | set `HS_TOTP_DIGITS` / `HS_TOTP_PERIOD` / `HS_TOTP_ALGO` |
