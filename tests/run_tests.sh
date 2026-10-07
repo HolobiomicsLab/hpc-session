@@ -998,5 +998,73 @@ HS_CONFIG_DIR="$init_dir" HS_PROFILE=bigiron "$HS_ROOT/bin/hpc-session" init >/d
 check "exported HS_PROFILE init creates it" 0 "$(status_of test -f "$init_dir/bigiron.conf")"
 rm -rf "$(dirname "$init_dir")"
 
+# --- two sessions on one link ----------------------------------------------------------
+
+# `close` tore the master and the tunnel down unconditionally, so two sessions sharing the
+# link — a wrapper script and an agent, two agents — each took the other's connection away
+# with its own close. Holders: `open` records one, `close` removes its own and tears down
+# only when none is left. Stubbed at hs_ssh (the `-O exit`), at hs_master_up and at the VPN
+# hooks, so nothing leaves the host.
+lease_ctl=$(mktemp -d "${TMPDIR:-/tmp}/hstest.XXXXXX")
+lease_log=$(mktemp "${TMPDIR:-/tmp}/hstest.XXXXXX")
+hs_real_ssh=$(declare -f hs_ssh)
+hs_ssh() { case "$*" in *"-O exit"*) echo "master-exit" >> "$lease_log" ;; esac; return 0; }
+hs_master_up() { return 0; }
+lease_env() {
+  HS_HOST=cluster HS_CONTROL_DIR="$lease_ctl" HS_VPN_STATUS_CMD=true HS_VPN_UP_CMD="" \
+    HS_VPN_DOWN_CMD="echo vpn-down >> $lease_log" "$@"
+}
+torn_down() { tr '\n' ' ' < "$lease_log" | sed 's/ $//'; }
+
+HS_LEASE=alpha lease_env hs_open_session >/dev/null 2>&1
+HS_LEASE=beta  lease_env hs_open_session >/dev/null 2>&1
+out=$(HS_LEASE=alpha lease_env hs_close_session 2>&1)
+check "a close with another holder keeps the link"  0 "$(status_of test ! -s "$lease_log")"
+check_contains "and names who still holds it"       "beta" "$out"
+check "the closing holder is gone"                  1 "$(status_of test -f "$lease_ctl/holders/alpha")"
+HS_LEASE=beta lease_env hs_close_session >/dev/null 2>&1
+check "the last close tears the link down"          "master-exit vpn-down" "$(torn_down)"
+
+# A holder named by a pid is only as live as that process.
+: > "$lease_log"
+sh -c 'exit 0' & dead_pid=$!; wait "$dead_pid"
+printf 'pid=%s\nnamed=no\nsince=%s\n' "$dead_pid" "$(date +%s)" > "$lease_ctl/holders/$dead_pid"
+HS_LEASE=gamma lease_env hs_close_session >/dev/null 2>&1
+check "a holder whose process ended does not keep the link" "master-exit vpn-down" "$(torn_down)"
+
+# A named holder outlives its shell, but not HS_LEASE_TTL: the backstop against a session
+# that ended without closing.
+: > "$lease_log"
+printf 'pid=%s\nnamed=yes\nsince=0\n' "$$" > "$lease_ctl/holders/stale"
+HS_LEASE=gamma lease_env hs_close_session >/dev/null 2>&1
+check "a holder past HS_LEASE_TTL does not keep the link" "master-exit vpn-down" "$(torn_down)"
+: > "$lease_log"
+printf 'pid=%s\nnamed=yes\nsince=%s\n' "$$" "$(date +%s)" > "$lease_ctl/holders/fresh"
+HS_LEASE=gamma lease_env hs_close_session >/dev/null 2>&1
+check "a fresh named holder does"                   "" "$(torn_down)"
+
+# HS_CLOSE_FORCE=1 is the way out when a holder is known to be dead: it closes and clears.
+HS_LEASE=alpha HS_CLOSE_FORCE=1 lease_env hs_close_session >/dev/null 2>&1
+check "HS_CLOSE_FORCE=1 closes over a live holder"  "master-exit vpn-down" "$(torn_down)"
+check "and clears every holder"                     1 "$(status_of test -d "$lease_ctl/holders")"
+
+# A session that only runs commands over a master someone else raised holds it too, and
+# status says who does.
+HS_LEASE=runner lease_env hs_ensure_open >/dev/null 2>&1
+check "an implicit open registers a holder"         0 "$(status_of test -f "$lease_ctl/holders/runner")"
+check_contains "status lists the holders"           "holders: runner" \
+  "$(HS_TOTP_BACKEND=none lease_env hs_status 2>&1)"
+
+# The holder's name becomes a file name under the control directory.
+out=$(HS_LEASE='../escape' lease_env hs_open_session 2>&1); rc=$?
+check "a holder name cannot leave the directory"    1 "$rc"
+check "and nothing was written outside it"          1 "$(status_of test -e "$lease_ctl/escape")"
+
+rm -rf "$lease_ctl" "$lease_log"
+unset -f lease_env torn_down
+eval "$hs_real_ssh"
+restore_lib
+. "$HS_ROOT/lib/session.sh"
+
 printf '\n%s passed, %s failed\n' "$PASSED" "$FAILED"
 [ "$FAILED" -eq 0 ]

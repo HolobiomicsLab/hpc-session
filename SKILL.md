@@ -145,6 +145,12 @@ never has to appear in your instructions. Then:
 
 - **open once, close once.** Everything in between is free; a connect-per-step loop costs
   a code each time.
+- **name your holder when you share the machine.** Another agent or a wrapper script may
+  be on the same master and tunnel; `close` tears them down only when no live holder
+  remains. Your holder is the calling process by default, which for an agent is a shell
+  that ends with the command — so export `HS_LEASE=<a name stable for your session>` on
+  every call (a session id does), and close with the same name. `status` lists the
+  holders; `HS_CLOSE_FORCE=1 hpc-session close` is for a holder you know is dead.
 - **capture the job id from `submit`'s stdout** — `job=$(hpc-session submit job.slurm)` —
   and pass that value on. Do not re-derive it from a log.
 - **read `watch`'s exit status** (0 finished, 1 unknown, 3 still queued). Only 0 licenses

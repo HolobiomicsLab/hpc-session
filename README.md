@@ -55,11 +55,20 @@ the same connection, hand it `$(hpc-session ssh-opts)`.
 hpc-session open                          # VPN up + one authenticated master
 hpc-session run squeue -u \$USER           # runs ON the cluster
 hpc-session run -- sacct -j 12345
-hpc-session close                         # drop master + VPN, freeing the link
+hpc-session close                         # drop master + VPN once no one else holds them
 ```
 
 `open` … `run` … `run` … `close` is the pattern that matters. Everything between the
 first and last call is free.
+
+Two sessions on one machine — an agent and a wrapper script, two agents — share one
+master and one tunnel. `open` records a *holder* for the caller, and `close` tears the
+link down only when no live holder remains, so one session's `close` no longer cuts the
+other's connection. The holder is the calling process by default; a session that runs
+each command in a fresh shell should export `HS_LEASE=<a name stable for that session>`
+so its holder outlives the shell. `status` lists the holders, a holder idle for
+`HS_LEASE_TTL` seconds (default 4 h) lapses, and `HS_CLOSE_FORCE=1 hpc-session close`
+tears down regardless.
 
 ### Running things, in the right place
 

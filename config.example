@@ -44,6 +44,16 @@ HS_VPN_UP_CMD=""
 HS_VPN_DOWN_CMD=""
 HS_VPN_STATUS_CMD=""
 
+# --- sharing the link between sessions ----------------------------------------------
+# One master and one tunnel serve every process that uses this profile. `open` records a
+# holder for the caller; `close` tears the link down only when no live holder remains.
+# The holder is the calling process by default. A session that runs each command in a
+# fresh shell (an agent) should set HS_LEASE to a name stable for that session, usually
+# from the environment: HS_LEASE="${CLAUDE_CODE_SESSION_ID:-}" or "${TMUX_PANE:-}".
+HS_LEASE=""
+HS_LEASE_TTL="14400"   # a holder idle this many seconds lapses (4 h); every open refreshes it
+HS_CLOSE_FORCE="0"     # 1 = close tears down whoever holds the link, and clears the holders
+
 # --- two-factor authentication (optional) ------------------------------------------
 # none     — key-only login (the common case)
 # keychain — macOS login Keychain (see HS_TOTP_SERVICE / HS_TOTP_ACCOUNT)

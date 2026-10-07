@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added
+
+- **`close` keeps a link another session still holds.** One master and one tunnel serve
+  every process on the machine that uses the profile, and `close` tore both down
+  unconditionally — so two sessions sharing the link (an agent and a wrapper script, two
+  agents) each cut the other's connection with its own close, and under 2FA the reopen
+  cost a code. `open`, and the implicit open under `run`, `push`, `pull` and `local`, now
+  record a holder; `close` removes its own and tears down only when no live holder remains.
+  A holder is the calling process by default, or `HS_LEASE=<name>` for a session whose
+  commands each run in a fresh shell; it lapses after `HS_LEASE_TTL` seconds idle (default
+  14400); `HS_CLOSE_FORCE=1` closes regardless and clears them. `status` lists the holders.
+
 ### Fixed
 
 - **A seed read that fails now says why.** The backend's message used to go to

@@ -200,6 +200,68 @@ hs_open_with_retries() {
   hs_die "could not open the master. Check: VPN up? seed correct ('hpc-session code')? enrolled?"
 }
 
+# --- who holds the link ---------------------------------------------------------------
+#
+# One master and one tunnel serve every process on the machine that uses the profile, and
+# `close` used to tear both down unconditionally. Two sessions sharing the link — two
+# agents, a wrapper script and a shell — therefore took each other's connection away: the
+# other side's next command failed on a dead socket, or on a tunnel that was no longer up,
+# and under 2FA the reopen cost a code it could not always produce. A holder file per
+# opener fixes that: `open` (and the implicit open under run, push, pull and local) records
+# who holds the link, `close` removes its own record and tears the link down only when no
+# live holder remains. `status` lists them.
+#
+# A holder is named by HS_LEASE when set, otherwise by the pid of the process that invoked
+# the tool — a wrapper script, an interactive shell. The file records that pid and the
+# time. A pid holder is live while its process is; a named holder is live until it closes,
+# because its pid is usually a transient shell (an agent runs each command in a new one).
+# Both expire HS_LEASE_TTL seconds after their last open — the backstop against a session
+# that ended without closing — and every open refreshes the stamp, so the expiry is an idle
+# time, not a lifetime. HS_CLOSE_FORCE=1 tears down regardless and clears every holder.
+hs_lease_name() {
+  local name="${HS_LEASE:-$PPID}"
+  case "$name" in
+    ""|*[!A-Za-z0-9._-]*) hs_die "HS_LEASE must be made of letters, digits, '.', '_' and '-' (got '$name')" ;;
+  esac
+  printf '%s' "$name"
+}
+
+hs_pid_alive() { [ "${1:-0}" -gt 1 ] 2>/dev/null && kill -0 "$1" 2>/dev/null; }
+
+hs_lease_take() {
+  local dir="$HS_CONTROL_DIR/holders" name named=no
+  name=$(hs_lease_name) || exit 1
+  [ -n "${HS_LEASE:-}" ] && named=yes
+  mkdir -p "$dir" || hs_die "cannot create $dir"
+  printf 'pid=%s\nnamed=%s\nsince=%s\n' "$PPID" "$named" "$(date +%s)" > "$dir/$name" \
+    || hs_die "cannot record the holder $dir/$name"
+}
+
+hs_lease_drop() {
+  local name
+  name=$(hs_lease_name) || exit 1
+  rm -f "$HS_CONTROL_DIR/holders/$name"
+}
+
+# Print the live holders, one per line, and remove the rest.
+hs_lease_live() {
+  local dir="$HS_CONTROL_DIR/holders" f key value pid named since now
+  [ -d "$dir" ] || return 0
+  now=$(date +%s)
+  for f in "$dir"/*; do
+    [ -f "$f" ] || continue
+    pid='' named='' since=''
+    while IFS='=' read -r key value; do
+      case "$key" in pid) pid=$value ;; named) named=$value ;; since) since=$value ;; esac
+    done < "$f"
+    if [ $((now - ${since:-0})) -lt "$HS_LEASE_TTL" ] && { [ "$named" = yes ] || hs_pid_alive "$pid"; }; then
+      printf '%s\n' "${f##*/}"
+    else
+      rm -f "$f"
+    fi
+  done
+}
+
 hs_open_session() {
   hs_require_host
   # Not swallowed: `set -uo pipefail` has no -e, so a failure here used to let the open
@@ -207,7 +269,7 @@ hs_open_session() {
   mkdir -p "$HS_CONTROL_DIR" && chmod 700 "$HS_CONTROL_DIR" \
     || hs_die "cannot create the control directory $HS_CONTROL_DIR — without it nothing multiplexes"
   hs_clean_stale
-  hs_master_up && { hs_note "master already up"; return 0; }
+  hs_master_up && { hs_lease_take; hs_note "master already up — joined it as holder $(hs_lease_name)"; return 0; }
   # Verify a code can be PRODUCED before raising the tunnel — not that it will be
   # accepted, which cannot be tested from here: under a full tunnel the login node is
   # usually unreachable until the tunnel is up. Catching the common failure early is still
@@ -217,11 +279,19 @@ hs_open_session() {
     hs_die "cannot produce a TOTP code: $(hs_seed_hint)"
   fi
   hs_vpn_connect
-  hs_open_with_retries
+  hs_open_with_retries && hs_lease_take
 }
 
 hs_close_session() {
   hs_require_host
+  local others
+  hs_lease_drop
+  others=$(hs_lease_live | tr '\n' ' ')
+  if [ -n "$others" ] && [ "$HS_CLOSE_FORCE" != 1 ]; then
+    hs_note "link kept — still held by: ${others}(HS_CLOSE_FORCE=1 closes it anyway)"
+    return 0
+  fi
+  [ "$HS_CLOSE_FORCE" = 1 ] && rm -rf "$HS_CONTROL_DIR/holders"
   hs_ssh -O exit "$HS_HOST" >/dev/null 2>&1 && hs_note "master closed" || hs_note "no master to close"
   if hs_uses_vpn && hs_vpn_up && [ -n "$HS_VPN_DOWN_CMD" ]; then
     eval "$HS_VPN_DOWN_CMD" >/dev/null 2>&1 && hs_note "VPN disconnected (link freed)"
@@ -229,7 +299,11 @@ hs_close_session() {
   return 0
 }
 
-hs_ensure_open() { hs_master_up || hs_open_session || exit 1; }
+# An implicit open joins the link as a holder too: a session that only ever runs commands
+# over a master someone else raised is still a user of it.
+hs_ensure_open() {
+  if hs_master_up; then hs_lease_take; else hs_open_session || exit 1; fi
+}
 
 # Run a command ON THE CLUSTER. BatchMode means a dead master fails fast instead of
 # hanging on a prompt nothing can answer.
@@ -288,7 +362,10 @@ hs_pull() {
 }
 
 hs_status() {
+  local holders
   hs_master_up && echo "master:  UP" || echo "master:  down"
+  holders=$(hs_lease_live | tr '\n' ' ')
+  echo "holders: ${holders:-none}"
   if hs_uses_vpn; then
     hs_vpn_up && echo "vpn:     connected" || echo "vpn:     disconnected"
   else

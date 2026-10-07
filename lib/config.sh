@@ -42,6 +42,10 @@ hs_apply_defaults() {
   : "${HS_HOST:=}"
   : "${HS_CONTROL_DIR:=$HOME/.ssh/hpc-session}"
   : "${HS_CONTROL_PERSIST:=8h}"
+  # Who holds the shared link; see "who holds the link" in lib/session.sh.
+  : "${HS_LEASE:=}"
+  : "${HS_LEASE_TTL:=14400}"
+  : "${HS_CLOSE_FORCE:=0}"
   : "${HS_CONNECT_TIMEOUT:=25}"
   : "${HS_AUTH_ATTEMPTS:=3}"
   : "${HS_VPN_UP_CMD:=}"
