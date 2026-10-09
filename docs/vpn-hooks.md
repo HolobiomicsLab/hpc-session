@@ -29,6 +29,24 @@ While the tunnel is up you may lose every other remote connection. Keep the wind
 — `open`, a burst of work, `close` — and close the session during any real wait. See
 [cluster-etiquette.md](cluster-etiquette.md#free-the-link-during-waits).
 
+## Two sessions, one VPN client
+
+A VPN client serves the whole machine, and most refuse a second connect while one is in
+flight — or, worse, treat it as a request to reconnect and drop the tunnel that was coming
+up. Two sessions that ran `hpc-session open` half a minute apart from a VPN-down state
+each ran `HS_VPN_UP_CMD`: on Cisco Secure Client the first stalled at "contacting host"
+until its caller gave up, the second was told the client was held by another application,
+and neither got a link.
+
+`open` therefore takes a lock before it looks for a master, and holds it until its holder
+is recorded. The second session waits, printing `waiting for another session's open
+(pid N)`, and once the first has finished it finds the master up and joins it — one
+tunnel, one authentication, both sessions. The wait is bounded by `HS_OPEN_LOCK_WAIT`
+seconds (default 300); a lock whose process is gone, or older than `HS_OPEN_LOCK_STALE`
+seconds (default 600), is taken over, which covers a connect that hangs. Your
+`HS_VPN_UP_CMD` need not guard against concurrency itself, but it should still fail rather
+than hang, so that a stuck connect ends inside the wait.
+
 ## Worked examples
 
 ### Cisco Secure Client / AnyConnect
@@ -48,7 +66,8 @@ path such as `/tmp/vpn.log` on a multi-user machine hands your username and the 
 gateway to anyone who looks — and a failed login sometimes echoes more than that.
 
 If a GUI client holds the connection lock, the CLI reports it as unavailable; quit the
-GUI application first.
+GUI application first. It says the same while another CLI connect is in flight, which is
+what two unserialised opens used to produce — see above.
 
 ### WireGuard
 

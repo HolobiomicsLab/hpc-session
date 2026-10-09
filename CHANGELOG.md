@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-10-09
+
+Two sessions on one machine — an agent and a wrapper script, two agents — now share the
+link safely in both directions: `close` no longer cuts a link another session still holds,
+and two `open`s no longer race each other for the VPN.
 
 ### Added
 
@@ -13,6 +17,19 @@
   A holder is the calling process by default, or `HS_LEASE=<name>` for a session whose
   commands each run in a fresh shell; it lapses after `HS_LEASE_TTL` seconds idle (default
   14400); `HS_CLOSE_FORCE=1` closes regardless and clears them. `status` lists the holders.
+- **One `open` at a time.** The holders coordinate sessions once the link is up; bringing
+  it up was unserialised. On 9 October two sessions ran `open` half a minute apart from a
+  VPN-down state and each ran `HS_VPN_UP_CMD`; one Cisco client serves the machine, so the
+  second connect met the first in flight — one stalled at the gateway until its caller's
+  240 s timeout, the other was told the client was held by another application — and
+  neither got a link. `open` now takes a lock (`$HS_CONTROL_DIR/open.lock`) before looking
+  for a master and holds it until its holder is recorded. A second `open` waits, printing
+  `waiting for another session's open (pid N)`, for up to `HS_OPEN_LOCK_WAIT` seconds
+  (default 300), then finds the master up and joins it as a holder. A lock whose process
+  is gone, or older than `HS_OPEN_LOCK_STALE` seconds (default 600), is taken over. The
+  lock is released however the open ends, including from inside the `$( )` subshells the
+  tool's own `watch`, `submit` and `fetch` open in. `close` keeps the link while an open
+  is in progress, and `status` shows one.
 
 ### Fixed
 

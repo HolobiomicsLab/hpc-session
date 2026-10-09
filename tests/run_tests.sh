@@ -1066,5 +1066,116 @@ eval "$hs_real_ssh"
 restore_lib
 . "$HS_ROOT/lib/session.sh"
 
+# --- two opens at once -----------------------------------------------------------------
+
+# The holders coordinate sessions once the link is up; bringing it up was unserialised. Two
+# sessions ran `open` half a minute apart from a VPN-down state, both ran the VPN connect,
+# one Cisco client served the machine, and neither got a link: one stalled at the gateway
+# until its caller's timeout, the other was told the client was held by another
+# application. `open` now takes a lock first; the second waits, then joins.
+#
+# Two REAL processes of the tool, not two function calls: the lock records a pid and is
+# released by an EXIT trap, and neither is exercised inside this shell. ssh is shadowed, and
+# the VPN hooks are shell commands that log and sleep; nothing leaves the host.
+race_dir=$(mktemp -d "${TMPDIR:-/tmp}/hstest.XXXXXX")
+race_log="$race_dir/log"
+race_lock="$race_dir/ctl/open.lock"
+mkdir -p "$race_dir/bin"
+cat > "$race_dir/bin/ssh" <<STUB
+#!/bin/sh
+# -O check asks whether the master is up, -O exit closes it, -G dumps the config; anything
+# else is a connect, which raises the master.
+case "\$*" in
+  *"-O check"*) [ -f "$race_dir/master-up" ] ;;
+  *"-O exit"*)  [ -f "$race_dir/master-up" ] && echo master-exit >> "$race_log"; rm -f "$race_dir/master-up" ;;
+  *" -G "*)     : ;;
+  *)            echo master-open >> "$race_log"; touch "$race_dir/master-up" ;;
+esac
+STUB
+chmod +x "$race_dir/bin/ssh"
+cat > "$race_dir/race.conf" <<PROFILE
+HS_HOST="cluster.invalid"
+HS_CONTROL_DIR="$race_dir/ctl"
+HS_TOTP_BACKEND="none"
+HS_VPN_STATUS_CMD="test -f $race_dir/vpn-up"
+HS_VPN_UP_CMD="echo vpn-up >> $race_log; sleep 2; touch $race_dir/vpn-up"
+HS_VPN_DOWN_CMD="echo vpn-down >> $race_log; rm -f $race_dir/vpn-up"
+PROFILE
+race() {  # holder name, then the subcommand
+  local name="$1"; shift
+  PATH="$race_dir/bin:$PATH" HS_CONFIG_DIR="$race_dir" HS_LEASE="$name" \
+    "$HS_ROOT/bin/hpc-session" -p race "$@"
+}
+race_events() { tr '\n' ' ' < "$race_log" 2>/dev/null | sed 's/ $//'; }
+
+# `exec`, so that $! IS the tool's pid — the one the lock records and the waiter names.
+( exec env PATH="$race_dir/bin:$PATH" HS_CONFIG_DIR="$race_dir" HS_LEASE=alpha \
+    "$HS_ROOT/bin/hpc-session" -p race open ) > "$race_dir/alpha.out" 2>&1 &
+race_alpha=$!
+tries=0
+while [ ! -L "$race_lock" ] && [ "$tries" -lt 100 ]; do sleep 0.1; tries=$((tries + 1)); done
+beta_out=$(race beta open 2>&1); beta_rc=$?
+wait "$race_alpha"; alpha_rc=$?
+check "the first open succeeds"                        0 "$alpha_rc"
+check "so does the second"                             0 "$beta_rc"
+check "the VPN came up once and the master opened once" "vpn-up master-open" "$(race_events)"
+check_contains "the second waited, and said for whom"  "waiting for another session's open (pid $race_alpha)" "$beta_out"
+check_contains "then joined the link the first raised" "joined it as holder beta" "$beta_out"
+check "both hold the link"                             "alpha beta" "$(cd "$race_dir/ctl/holders" && echo *)"
+check "and the lock is released"                       1 "$(status_of test -L "$race_lock")"
+
+# A lock left by a process that is gone — killed before its trap, a reboot — is taken over.
+sh -c 'exit 0' & dead_pid=$!; wait "$dead_pid"
+ln -s "pid=$dead_pid since=$(date +%s) holder=ghost" "$race_lock"
+out=$(race gamma open 2>&1); rc=$?
+check "a lock left by a dead process does not block"   0 "$rc"
+check_contains "and the takeover is reported"          "left by pid $dead_pid, which is gone" "$out"
+
+# So is one a live process has held past HS_OPEN_LOCK_STALE: a connect that hangs.
+ln -s "pid=$$ since=0 holder=hung" "$race_lock"
+out=$(race gamma open 2>&1); rc=$?
+check "a lock past HS_OPEN_LOCK_STALE does not block"  0 "$rc"
+check_contains "and says why it was cleared"           "past HS_OPEN_LOCK_STALE" "$out"
+
+# A live, fresh lock is waited for — up to HS_OPEN_LOCK_WAIT, then the open fails naming
+# the other session, and leaves its lock where it was.
+ln -s "pid=$$ since=$(date +%s) holder=busy" "$race_lock"
+out=$(HS_OPEN_LOCK_WAIT=0 race gamma open 2>&1); rc=$?
+check "the wait is bounded"                            1 "$rc"
+check_contains "and the failure names the other open"  "(pid $$, holder busy)" "$out"
+check "whose lock is left alone"                       0 "$(status_of test -L "$race_lock")"
+
+# `close` while another session's open is in progress keeps the link: the opener has no
+# holder yet, and the tunnel it is raising is about to be its own.
+: > "$race_log"
+race alpha close >/dev/null 2>&1; race beta close >/dev/null 2>&1   # gamma still holds
+out=$(race gamma close 2>&1)
+check_contains "close during an open keeps the link"   "open is in progress (pid $$" "$out"
+check "and tears nothing down"                         "" "$(race_events)"
+check_contains "status shows the open in progress"     "open:    in progress (pid $$)" "$(race delta status 2>&1)"
+HS_CLOSE_FORCE=1 race delta close >/dev/null 2>&1
+check "HS_CLOSE_FORCE=1 closes over it"                "master-exit vpn-down" "$(race_events)"
+rm -f "$race_lock"
+
+# A failed open releases the lock on its way out: the trap, not the happy path.
+out=$(HS_VPN_UP_CMD=false race alpha open 2>&1); rc=$?
+check "a failed VPN connect fails the open"            1 "$rc"
+check "and leaves no lock behind"                      1 "$(status_of test -L "$race_lock")"
+
+# The tool's own implicit opens run inside $( ) — `answer=$(hs_run_sh ...)` in watch — and a
+# subshell inherits no trap. An hs_die in there used to leave the lock under the PARENT's
+# pid, alive, so the parent's next open waited the whole of HS_OPEN_LOCK_WAIT for itself.
+hs_clean_stale() { :; }
+hs_master_up() { return 1; }
+out=$( HS_HOST=cluster HS_CONTROL_DIR="$race_dir/ctl" HS_TOTP_BACKEND=none \
+       HS_VPN_STATUS_CMD=false HS_VPN_UP_CMD=false hs_open_session 2>&1 ); rc=$?
+check "an open that dies inside a subshell fails"      1 "$rc"
+check "and releases the lock on its way out"           1 "$(status_of test -L "$race_lock")"
+unset -f hs_clean_stale hs_master_up
+. "$HS_ROOT/lib/session.sh"
+
+rm -rf "$race_dir"
+unset -f race race_events
+
 printf '\n%s passed, %s failed\n' "$PASSED" "$FAILED"
 [ "$FAILED" -eq 0 ]

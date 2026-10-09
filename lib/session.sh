@@ -41,10 +41,15 @@ hs_temp_drop() {
 # status the conventional 128+signal instead of the EXIT trap's own, and they state the
 # intent rather than resting on that behaviour of bash. What matters is that SOME trap
 # exists; before this, none did.
-trap 'hs_temp_clean' EXIT
-trap 'hs_temp_clean; exit 130' INT
-trap 'hs_temp_clean; exit 143' TERM
-trap 'hs_temp_clean; exit 129' HUP
+#
+# The open lock (see "one open at a time" below) leaves with the temp files, and for the
+# same reason: an opener stopped while its VPN was coming up — the caller's timeout, a
+# Ctrl-C — must not leave the next opener waiting on a lock nobody will release.
+hs_cleanup() { hs_open_lock_release; hs_temp_clean; }
+trap 'hs_cleanup' EXIT
+trap 'hs_cleanup; exit 130' INT
+trap 'hs_cleanup; exit 143' TERM
+trap 'hs_cleanup; exit 129' HUP
 
 # ControlPath uses %C (a hash of the connection parameters) to stay well inside the
 # ~104-character limit on unix socket paths.
@@ -262,12 +267,131 @@ hs_lease_live() {
   done
 }
 
+# --- one open at a time ------------------------------------------------------------------
+#
+# The holders above coordinate sessions once the link is UP. Bringing it up was not
+# coordinated at all: two sessions that ran `open` half a minute apart from a VPN-down
+# state each found no master and no tunnel, and each ran HS_VPN_UP_CMD. One VPN client
+# serves the whole machine, so the second connect met the first in flight — it stalled at
+# the gateway until its caller's timeout, or was told the client was held by something
+# else, or dropped the half-raised tunnel to "reconnect" — and neither session got a link.
+# Between an open's start and its master coming up there is no holder to see; that is the
+# window the holders cannot close.
+#
+# A lock under the control directory does. `open` takes it before looking for a master and
+# keeps it until its holder is recorded. A second opener waits, says whom it waits for, and
+# then finds the master up and joins it as a holder — one tunnel, one authentication, two
+# sessions, which is what the holders were built for. The wait is bounded by
+# HS_OPEN_LOCK_WAIT seconds; past it the opener fails, naming the pid that holds the lock.
+# A lock is stale, and taken over, when its owner's process is gone or when it is older
+# than HS_OPEN_LOCK_STALE seconds — the backstop against a VPN connect that hangs while its
+# process lives on. `close` keeps the link while an open is in progress: the opener has no
+# holder yet, and the tunnel it is raising is about to be its own.
+#
+# The lock is a SYMLINK, not a directory. `ln -s` either creates it or fails because it
+# exists, as atomically as mkdir, but its target is written in the same step — so a reader
+# never meets a lock whose owner is not recorded yet, which a directory plus an owner file
+# would allow. The target IS the record, `pid=N since=S holder=H`, and readlink returns it
+# without opening anything. The pid is this process, $$, not the holder's PPID: it is the
+# process that will release the lock, and the one a waiter may check for life.
+HS_OPEN_LOCK_HELD=""
+
+hs_open_lock_path() { printf '%s/open.lock' "$HS_CONTROL_DIR"; }
+
+# The lock's record as three words — pid, since, holder — or nothing when there is no lock.
+# A target that does not parse yields pid 0, which no process has, so a stray symlink at
+# the path is cleared like a dead owner's instead of blocking every open.
+hs_open_lock_record() {
+  local target pid since holder
+  target=$(readlink "$(hs_open_lock_path)" 2>/dev/null) || return 0
+  pid=${target#pid=}; pid=${pid%% *}
+  since=${target#*since=}; since=${since%% *}
+  holder=${target#*holder=}
+  case "$pid"   in ''|*[!0-9]*) pid=0 ;; esac
+  case "$since" in ''|*[!0-9]*) since=0 ;; esac
+  printf '%s %s %s\n' "$pid" "$since" "${holder:-?}"
+}
+
+# The pid of a live, unexpired open in progress, or nothing (and status 1).
+hs_open_in_progress() {
+  local pid since holder
+  read -r pid since holder <<< "$(hs_open_lock_record)"
+  [ -n "${pid:-}" ] && hs_pid_alive "$pid" \
+    && [ $(( $(date +%s) - since )) -lt "$HS_OPEN_LOCK_STALE" ] || return 1
+  printf '%s\n' "$pid"
+}
+
+hs_open_lock_acquire() {
+  local lock holder err pid since owner age waited=0 told=no
+  lock=$(hs_open_lock_path)
+  holder=$(hs_lease_name) || exit 1
+  while :; do
+    if err=$(ln -s "pid=$$ since=$(date +%s) holder=$holder" "$lock" 2>&1); then
+      HS_OPEN_LOCK_HELD="$lock"
+      # A subshell starts with none of the parent's traps, and the tool's own implicit opens
+      # run in one — `answer=$(hs_run_sh ...)` in watch, submit and fetch. An hs_die in
+      # there ends the subshell without the release above, and leaves the lock recorded
+      # under $$, the PARENT's pid, which is alive: the next opener, this process included,
+      # would wait the whole of HS_OPEN_LOCK_WAIT for it. So the subshell arms its own.
+      [ "${BASH_SUBSHELL:-0}" -gt 0 ] && trap 'hs_open_lock_release' EXIT
+      [ "$told" = yes ] && hs_note "the other open finished after ${waited}s"
+      return 0
+    fi
+    read -r pid since owner <<< "$(hs_open_lock_record)"
+    if [ -z "${pid:-}" ]; then
+      case "$err" in
+        # It existed for the ln and was gone for the readlink: its owner just released it.
+        # Anything that is not a symlink at that path is not a lock this tool made.
+        *"File exists"*) [ -e "$lock" ] && hs_die "$lock is in the way and is not an open lock — move it aside"; continue ;;
+        *) hs_die "cannot take the open lock $lock: $err" ;;
+      esac
+    fi
+    age=$(( $(date +%s) - since ))
+    if ! hs_pid_alive "$pid"; then
+      hs_note "clearing an open lock left by pid $pid, which is gone"
+      rm -f "$lock"; continue
+    fi
+    if [ "$age" -ge "$HS_OPEN_LOCK_STALE" ]; then
+      hs_note "clearing an open lock pid $pid has held for ${age}s — past HS_OPEN_LOCK_STALE ($HS_OPEN_LOCK_STALE)"
+      rm -f "$lock"; continue
+    fi
+    [ "$waited" -lt "$HS_OPEN_LOCK_WAIT" ] \
+      || hs_die "another session's open (pid $pid, holder $owner) has held $lock for ${age}s and the ${HS_OPEN_LOCK_WAIT}s wait (HS_OPEN_LOCK_WAIT) is over — if that process is hung, stop it; the lock then clears itself"
+    if [ "$told" = no ]; then
+      hs_note "waiting for another session's open (pid $pid) — holder $owner, ${age}s in; up to ${HS_OPEN_LOCK_WAIT}s (HS_OPEN_LOCK_WAIT), then joining the link it raises"
+      told=yes
+    fi
+    sleep 1; waited=$((waited + 1))
+  done
+}
+
+# Only this process's own record is removed: a lock taken over as stale and since re-taken
+# by another opener is that opener's, not ours.
+hs_open_lock_release() {
+  [ -n "$HS_OPEN_LOCK_HELD" ] || return 0
+  case "$(readlink "$HS_OPEN_LOCK_HELD" 2>/dev/null)" in
+    "pid=$$ "*) rm -f "$HS_OPEN_LOCK_HELD" ;;
+  esac
+  HS_OPEN_LOCK_HELD=""
+  return 0
+}
+
 hs_open_session() {
   hs_require_host
   # Not swallowed: `set -uo pipefail` has no -e, so a failure here used to let the open
   # proceed and simply never multiplex — which looks like a slow cluster, not a broken setup.
   mkdir -p "$HS_CONTROL_DIR" && chmod 700 "$HS_CONTROL_DIR" \
     || hs_die "cannot create the control directory $HS_CONTROL_DIR — without it nothing multiplexes"
+  hs_open_lock_acquire
+  hs_open_locked; local rc=$?
+  hs_open_lock_release
+  return "$rc"
+}
+
+# Everything between looking for a master and recording a holder, under the open lock. The
+# master check is inside it on purpose: a waiter that had checked before waiting would
+# raise a second master over the one the first opener just brought up — and spend a code.
+hs_open_locked() {
   hs_clean_stale
   hs_master_up && { hs_lease_take; hs_note "master already up — joined it as holder $(hs_lease_name)"; return 0; }
   # Verify a code can be PRODUCED before raising the tunnel — not that it will be
@@ -284,11 +408,18 @@ hs_open_session() {
 
 hs_close_session() {
   hs_require_host
-  local others
+  local others opener
   hs_lease_drop
   others=$(hs_lease_live | tr '\n' ' ')
   if [ -n "$others" ] && [ "$HS_CLOSE_FORCE" != 1 ]; then
     hs_note "link kept — still held by: ${others}(HS_CLOSE_FORCE=1 closes it anyway)"
+    return 0
+  fi
+  # An open in progress has no holder yet: it is between raising the tunnel and recording
+  # one, and taking the tunnel down under it is the collision the open lock exists to end.
+  opener=$(hs_open_in_progress)
+  if [ -n "$opener" ] && [ "$HS_CLOSE_FORCE" != 1 ]; then
+    hs_note "link kept — another session's open is in progress (pid $opener; HS_CLOSE_FORCE=1 closes it anyway)"
     return 0
   fi
   [ "$HS_CLOSE_FORCE" = 1 ] && rm -rf "$HS_CONTROL_DIR/holders"
@@ -362,10 +493,11 @@ hs_pull() {
 }
 
 hs_status() {
-  local holders
+  local holders opener
   hs_master_up && echo "master:  UP" || echo "master:  down"
   holders=$(hs_lease_live | tr '\n' ' ')
   echo "holders: ${holders:-none}"
+  opener=$(hs_open_in_progress) && echo "open:    in progress (pid $opener)"
   if hs_uses_vpn; then
     hs_vpn_up && echo "vpn:     connected" || echo "vpn:     disconnected"
   else

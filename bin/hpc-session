@@ -128,7 +128,7 @@ fi
 # someone needs to say which copy of the tool they are running, and the answer does not
 # depend on a profile. CHANGELOG.md is the other half of this string; a test holds them
 # together so a tag cannot drift from what the tool reports.
-HS_VERSION="0.1.0"
+HS_VERSION="0.2.0"
 case "${1:-}" in
   version|--version) printf 'hpc-session %s\n' "$HS_VERSION"; exit 0 ;;
 esac

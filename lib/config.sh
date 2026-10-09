@@ -46,6 +46,9 @@ hs_apply_defaults() {
   : "${HS_LEASE:=}"
   : "${HS_LEASE_TTL:=14400}"
   : "${HS_CLOSE_FORCE:=0}"
+  # One open at a time; see "one open at a time" in lib/session.sh.
+  : "${HS_OPEN_LOCK_WAIT:=300}"
+  : "${HS_OPEN_LOCK_STALE:=600}"
   : "${HS_CONNECT_TIMEOUT:=25}"
   : "${HS_AUTH_ATTEMPTS:=3}"
   : "${HS_VPN_UP_CMD:=}"

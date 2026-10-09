@@ -145,6 +145,11 @@ never has to appear in your instructions. Then:
 
 - **open once, close once.** Everything in between is free; a connect-per-step loop costs
   a code each time.
+- **a second `open` waits, then joins.** If another session is bringing the link up, yours
+  prints `waiting for another session's open (pid N)` and, once that open finishes, joins
+  the link it raised. Let it wait: starting another open in parallel is what the lock
+  exists to prevent, and the wait is bounded by `HS_OPEN_LOCK_WAIT` (5 min). `status`
+  shows an open in progress.
 - **name your holder when you share the machine.** Another agent or a wrapper script may
   be on the same master and tunnel; `close` tears them down only when no live holder
   remains. Your holder is the calling process by default, which for an agent is a shell

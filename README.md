@@ -70,6 +70,15 @@ so its holder outlives the shell. `status` lists the holders, a holder idle for
 `HS_LEASE_TTL` seconds (default 4 h) lapses, and `HS_CLOSE_FORCE=1 hpc-session close`
 tears down regardless.
 
+Two sessions that *open* at once are serialised. Before looking for a master, `open` takes
+a lock under the control directory and holds it until its holder is recorded. A second
+`open` waits — printing `waiting for another session's open (pid N)` — for up to
+`HS_OPEN_LOCK_WAIT` seconds (default 5 min), then finds the master up and joins it as a
+holder. Without this both sessions raised the VPN, and one VPN client serves the machine:
+the second connect met the first in flight and neither got a link. A lock whose process is
+gone, or older than `HS_OPEN_LOCK_STALE` seconds (default 10 min), is taken over. `status`
+shows an open in progress, and `close` keeps the link while one is.
+
 ### Running things, in the right place
 
 The distinction that bites people:
@@ -246,6 +255,9 @@ ships — version 3.2, which is the floor this tool is written to.
 ## Limitations
 
 - One master per host alias. Two profiles pointing at the same alias share it.
+- The open lock lives in `HS_CONTROL_DIR`, so it serialises every profile that shares that
+  directory — the default, and the right scope for one VPN client per machine. Two profiles
+  with different control directories are not serialised against each other.
 - `render` substitutes single-line values only; give `${PAYLOAD}` a script for anything
   longer.
 - `fetch` matches regular files directly in `HS_REMOTE_WORKDIR` whose name contains the

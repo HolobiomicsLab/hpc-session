@@ -53,6 +53,12 @@ HS_VPN_STATUS_CMD=""
 HS_LEASE=""
 HS_LEASE_TTL="14400"   # a holder idle this many seconds lapses (4 h); every open refreshes it
 HS_CLOSE_FORCE="0"     # 1 = close tears down whoever holds the link, and clears the holders
+# Two sessions that open at once would each raise the VPN, and one VPN client serves the
+# machine. `open` therefore takes a lock first ($HS_CONTROL_DIR/open.lock); a second open
+# waits for the first, up to HS_OPEN_LOCK_WAIT seconds, then joins the link it raised. A
+# lock whose process is gone, or older than HS_OPEN_LOCK_STALE seconds, is taken over.
+HS_OPEN_LOCK_WAIT="300"
+HS_OPEN_LOCK_STALE="600"
 
 # --- two-factor authentication (optional) ------------------------------------------
 # none     — key-only login (the common case)
